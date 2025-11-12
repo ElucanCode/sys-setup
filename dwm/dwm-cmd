@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+
+print_help() {
+    echo "Usage:"
+    echo "  dwm-cmd [command] [argument]"
+    echo "Commands:"
+    echo "  - help"
+    echo "  - theme [light|dark|toggle]"
+}
+
+signal() {
+    xsetroot -name "fsignal:$1"
+}
+
+update_theme() {
+    case "$1" in
+        light)  signal 1 ;;
+        dark)   signal 2 ;;
+        toggle) signal 3 ;;
+        *)      echo "Unexpected theme argument '$1'"
+                exit 1   ;;
+    esac
+}
+
+case "$1" in
+    help)  print_help ;;
+    theme) update_theme "$2" ;;
+    *)     echo "Unexpected command argument '$1'"
+           exit 1   ;;
+esac

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=dwm
+Comment=dynamic window manager
+Exec=dwm > /tmp/dwm.log
+TryExec=dwm
+Type=Application
+X-LightDm-DesktopName=dwm
+DesktopNames=dwm
+Keywords=windowmanager;window-manager;dwm

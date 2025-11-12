@@ -1,0 +1,39 @@
+#! /usr/bin/bash
+
+if [[ $1 == "help" ]]; then
+    echo "Available subcommands:"
+    echo "  volume <up|down|toggle>"
+    echo "  backlight <up|down>"
+    exit 0
+fi
+
+if [[ $# -ne 2 ]]; then
+    echo "Error: Pass a subcommand and argument"
+    echo "       Use 'help' subcommand for more information"
+    exit 1
+fi
+
+volume() {
+    case $1 in 
+        up)     pactl set-sink-volume @DEFAULT_SINK@ +5% ;;
+        down)   pactl set-sink-volume @DEFAULT_SINK@ -5% ;;
+        toggle) pactl set-sink-mute @DEFAULT_SINK@ toggle ;;
+        *)      echo "Error: Unknown argument for volume subcommand" ;;
+    esac
+    pkill -RTMIN+2 dwmblocks
+}
+
+backlight() {
+    case $1 in 
+        up)     backlight_control +5% ;;
+        down)   backlight_control -5% ;;
+        *)      echo "Error: Unknown argument for backlight subcommand" ;;
+    esac
+    pkill -RTMIN+1 dwmblocks
+}
+
+case $1 in
+    volume) volume $2 ;;
+    backlight) backlight $2 ;;
+    *) echo "Error: Unknown subcommand ${1}" ;;
+esac
