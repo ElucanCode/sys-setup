@@ -15,4 +15,6 @@ $ ./sys-setup
 
 # How it works
 It lists all sub directories, checks if they contain a `install.c` file. Every
-such file is compiled to a `.so` file, which is then `dlopen`-ed.
+such file is compiled to a `.so` file, which is then `dlopen`-ed. The only
+compile-time dependencies are `libc` and `libdl`. There are some optional
+dependencies which are checked and loaded at runtime.
