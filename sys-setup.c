@@ -3,6 +3,7 @@
 #include <dirent.h>
 #include <dlfcn.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,38 +14,48 @@
 
 #include "installer.h"
 
+#define BUFFER_SIZE 1024
+
 // :state
 
-static Log_Level min_level;
+enum {
+// Package managers
+    Pacman   = 1 << 0,  /* implies libalpm */
 
-static struct {
-    void **items;
-    size_t len;
-    size_t cap;
-} ptrs;
+// Programs
+    Git      = 1 << 8,
+    Curl     = 1 << 9,  /* implies libcurl */
+};
 
-static struct {
-    char *name;
-    char **flags;
-} compiler;
+typedef struct {
+    Log_Level min_level;
+    DA_STRUCT(void*) ptrs;
+    char *cc;
+    Strings cflags;
 
-static bool dry;
+    // Only execute one installer after the previous is done
+    bool in_sequence;
+    bool dry;
+    // Allow or forbid direct networking
+    bool direct_net;
+} State;
+
+static State state;
 
 // :helper
 
-static int _strcmp(const void* a, const void* b)
+static int _strcmp(const void *a, const void *b)
 {
     return strcmp(*(char**)a, *(char**)b);
 }
 
-static size_t _arrlen(void** arr)
+static int _ptrcmp(const void *a, const void *b)
 {
-    size_t len = 0;
-    for (void **a = arr; *a != NULL; a += 1, len += 1);
-    return len;
+    return a - b;
 }
 
 // :installer.h :implementation
+// :utility
 
 void die_loc(Source_Loc loc, char* fmt, ...)
 {
@@ -80,7 +91,7 @@ void msg_loc(Source_Loc loc, Log_Level ll, char* fmt, ...)
             [LL_Error] = "\033[31mERROR\033[0m" },
     };
 
-    if (ll < min_level)
+    if (ll < state.min_level)
         return;
 
     fprintf(stderr, "[%s] "SRCLOC_FMT": ",
@@ -100,8 +111,29 @@ void msg_loc(Source_Loc loc, Log_Level ll, char* fmt, ...)
 
 void register_ptr(void *ptr)
 {
-    da_append(&ptrs, ptr);
+    // TODO: check if ptr is somewhere in the state OR if it already is registered
+    da_append(&state.ptrs, ptr);
 }
+
+Strings _strs(char *first, ...)
+{
+    Strings res = zero(Strings);
+
+    va_list args;
+    va_start(args, first);
+    char *cur = first;
+    do {
+        cur = strdup(cur);
+        da_append(&res, cur);
+    } while ((cur = va_arg(args, char*)));
+    va_end(args);
+
+    da_expand(&state.ptrs, res);
+    register_ptr(res.items);
+    return res;
+}
+
+// :file :path :fs
 
 int exists(char *path, int ff)
 {
@@ -149,7 +181,7 @@ bool ls(char *path, int ff, Strings *result)
         return false;
     }
 
-    *result = (Strings) { 0 };
+    *result = zero(Strings);
     for (struct dirent *ent = readdir(dir); ent != NULL; ent = readdir(dir)) {
         if ((ent->d_type == DT_REG && (ff & FF_File))
             || (ent->d_type == DT_DIR && (ff & FF_Directory))
@@ -160,80 +192,102 @@ bool ls(char *path, int ff, Strings *result)
         }
     }
     closedir(dir);
-    da_append_many(&ptrs, result->items, result->len);
+    da_expand(&state.ptrs, *result);
     register_ptr(result->items);
     qsort(result->items, result->len, sizeof(*result->items), _strcmp);
 
     return true;
 }
 
-bool prcs_write(Process p, char *in)
+int rm(Strings paths)
 {
-    if (p.stdin_ == INVALID_FILE_DES) {
-        msg(LL_Error, "Can not write to stdin");
+    int errs = 0;
+    for (size_t i = 0; i < paths.len; i += 1) {
+        if (-1 == remove(paths.items[i]))  {
+            msg(LL_Error, "Failed to remove '%s':", paths.items[i]);
+            errs += 1;
+        }
+    }
+    return errs;
+}
+
+bool cp(char *from, char *to)
+{
+    Fd rfd = open(from, O_RDONLY);
+    if (rfd == INVALID_FILE_DES) {
+        msg(LL_Error, "Failed to open %s:", from);
+        return false;
+    }
+    Fd wfd = open(to, O_CREAT | O_WRONLY | O_TRUNC);
+    if (wfd == INVALID_FILE_DES) {
+        msg(LL_Error, "Failed to open %s:", to);
+        close(rfd);
         return false;
     }
 
-    const size_t in_len = strlen(in);
+    bool ok = false;
+    Buffer bytes = read_all(rfd);
+    if (bytes.items)
+        ok = write_all(wfd, bytes);
+
+    close(rfd);
+    close(wfd);
+    if (bytes.items)
+        free(bytes.items);
+    return ok;
+}
+
+bool write_all(Fd fd, Buffer bytes)
+{
     size_t written = 0;
-    while (written < in_len) {
-        ssize_t w = write(p.stdin_, in + written, in_len - written);
+    while (written < bytes.len) {
+        ssize_t w = write(fd, bytes.items + written, bytes.len - written);
         if (-1 == w) {
-            msg(LL_Error, "Failed to write to child stdin (continuing):");
-            break;
+            msg(LL_Error, "Failed to write to fd:");
+            return false;
         }
         written += w;
     }
-    return written == in_len;
+    return true;
 }
 
-int prcs_await(Process p, Buffer *out, Buffer *err)
+Buffer read_all(Fd fd)
 {
-    int ws;
-    if (-1 == waitpid(p.id, &ws, 0)) {
-        msg(LL_Error, "Wait failed:");
-        return -1;
-    }
-
-    if (!out && !err)
-        return 0;
-
-    const size_t buf_len = 1024;
-    char buf[buf_len];
-    Fd fds[2] = { p.stdout_, p.stderr_ };
-    Buffer *bs[2] = { out, err };
-
-    for (size_t i = 0; i < 2; i += 1) {
-        if (fds[i] == INVALID_FILE_DES || bs[i] == NULL)
-            continue;
-
-        bool exit = false;
-        do {
-            ssize_t r = read(fds[i], buf, buf_len);
-            switch (r) {
-            case -1:
-                msg(LL_Error, "Error while reading std%s:", i == 0 ? "out" : "err");
-            case 0:
-                exit = true;
-                break;
-            default:
-                da_append_many(bs[i], buf, r);
-                break;
-            }
-        } while (!exit);
-        register_ptr(bs[i]->items);
-
-        if (-1 == close(fds[i])) {
-            msg(LL_Error, "Failed to close std%s:", i == 0 ? "out" : "err");
+    char rbuf[BUFFER_SIZE];
+    Buffer buf = zero(Buffer);
+    bool error = false;
+    bool exit = false;
+    do {
+        ssize_t r = read(fd, rbuf, sizeof(rbuf));
+        switch (r) {
+        case -1:
+            msg(LL_Error, "Failed to read fd:");
+            error = true;
+        case 0:
+            exit = true;
+            break;
+        default:
+            da_append_many(&buf, rbuf, r);
+            break;
         }
-    }
+    } while (!exit);
 
-    return WIFEXITED(ws) ? WEXITSTATUS(ws) : -1;
+    if (error) {
+        if (buf.items)
+            free(buf.items);
+        buf = zero(Buffer);
+    } else {
+        register_ptr(buf.items);
+    }
+    
+    return buf;
 }
+
+// :command :process
 
 Process cmd_execa(Cmd cmd, int redirects)
 {
-    Buffer cmd_str = { 0 };
+    Buffer cmd_str = zero(Buffer);
     for (size_t i = 0; i < cmd.len; i += 1) {
         da_append_many(&cmd_str, cmd.items[i], strlen(cmd.items[i]));
         da_append(&cmd_str, ' ');
@@ -309,6 +363,68 @@ Process cmd_execa(Cmd cmd, int redirects)
     };
 }
 
+bool prcs_write(Process p, char *in)
+{
+    if (p.stdin_ == INVALID_FILE_DES) {
+        msg(LL_Error, "Can not write to stdin");
+        return false;
+    }
+
+    const size_t in_len = strlen(in);
+    size_t written = 0;
+    while (written < in_len) {
+        ssize_t w = write(p.stdin_, in + written, in_len - written);
+        if (-1 == w) {
+            msg(LL_Error, "Failed to write to child stdin (continuing):");
+            break;
+        }
+        written += w;
+    }
+    return written == in_len;
+}
+
+bool prcs_await(Process *p, Buffer *out, Buffer *err)
+{
+    if (-1 == waitpid(p->id, &p->status, 0)) {
+        msg(LL_Error, "Wait failed:");
+        return false;
+    }
+
+    if (!out && !err)
+        return true;
+
+    char buf[BUFFER_SIZE];
+    Fd fds[2] = { p->stdout_, p->stderr_ };
+    Buffer *bs[2] = { out, err };
+
+    for (size_t i = 0; i < 2; i += 1) {
+        if (fds[i] == INVALID_FILE_DES || bs[i] == NULL)
+            continue;
+
+        bool exit = false;
+        do {
+            ssize_t r = read(fds[i], buf, sizeof(buf));
+            switch (r) {
+            case -1:
+                msg(LL_Error, "Error while reading std%s:", i == 0 ? "out" : "err");
+            case 0:
+                exit = true;
+                break;
+            default:
+                da_append_many(bs[i], buf, r);
+                break;
+            }
+        } while (!exit);
+        register_ptr(bs[i]->items);
+
+        if (-1 == close(fds[i])) {
+            msg(LL_Error, "Failed to close std%s:", i == 0 ? "out" : "err");
+        }
+    }
+
+    return true;
+}
+
 int cmd_execw(Cmd cmd, char *in, Buffer *out, Buffer *err)
 {
     int redirects = IOR_none;
@@ -317,30 +433,79 @@ int cmd_execw(Cmd cmd, char *in, Buffer *out, Buffer *err)
     if (err) redirects |= IOR_stderr;
 
     Process p = cmd_execa(cmd, redirects);
-    if (p.id == INVALID_PID) {
+    if (p.id == INVALID_PID)
         return -1;
-    }
     if (in) {
         // NOTE: Ignoring error because we still need to wait for the process
         prcs_write(p, in);
     }
-    return prcs_await(p, out, err);
+    if (!prcs_await(&p, out, err))
+        return -1;
+    return WIFEXITED(p.status) ? WEXITSTATUS(p.status) : -1;
 }
 
-bool compile(char *file, char *out, char **cflags, char **lflags)
+Cmd sudo(Cmd cmd)
 {
-    Cmd cmd = { 0 };
-    da_append(&cmd, compiler.name);
-    da_append_many(&cmd, compiler.flags, _arrlen((void**) compiler.flags));
-    if (cflags)
-        da_append_many(&cmd, cflags, _arrlen((void**) cflags));
-    da_append(&cmd, file);
-    da_append(&cmd, "-o");
-    da_append(&cmd, out);
-    if (lflags)
-        da_append_many(&cmd, lflags, _arrlen((void**) lflags));
+    da_insert_shift(&cmd, 0, "sudo");
+    return cmd;
+}
 
-    Buffer err = { 0 };
+Cmd make(Strings rules, char *in_dir)
+{
+    Cmd cmd = zero(Cmd);
+    da_append(&cmd, strdup("make"));
+    if (in_dir)
+        da_expand(&cmd, strs("-C", in_dir));
+    da_expand(&cmd, rules);
+    return cmd;
+}
+
+Cmd git_clone(char *repo, char *dest_dir, bool init_submodules)
+{
+    todo();
+}
+
+Cmd git_checkout(char *repo_dir, char *target)
+{
+    todo();
+}
+
+Cmd git_clean(char *repo_dir)
+{
+    todo();
+}
+
+// :package :installation
+
+bool is_installed(char *pkg)
+{
+    todo();
+}
+
+bool ensure_uptodate(Strings pkgs)
+{
+    todo();
+}
+
+bool install_pkg(char *name)
+{
+    todo();
+}
+
+// :compilation
+
+bool compile(char *file, char *out, Strings cflags, Strings lflags)
+{
+    Cmd cmd = zero(Cmd);
+    da_append(&cmd, state.cc);
+    da_expand(&cmd, state.cflags);
+    if (cflags.len)
+        da_expand(&cmd, cflags);
+    da_expand(&cmd, strs(file, "-o", out));
+    if (lflags.len)
+        da_expand(&cmd, lflags);
+
+    Buffer err = zero(Buffer);
     bool ok = !cmd_execw(cmd, NULL, NULL, &err);
     if (!ok)
         msg(LL_Error, "Compilation of '%s' failed:\n%.*s",
@@ -354,110 +519,58 @@ bool compile(char *file, char *out, char **cflags, char **lflags)
     return true;
 }
 
-bool compile_so(char **cfile, char *so, char **cflags, char **lflags)
+bool compile_so(Strings cfiles, char *so, Strings cflags, Strings lflags)
 {
+    // TODO: check if the so file already exists and is up to date
     bool ok = true;
 
-    Strings objs = { 0 };
-    for (size_t i = 0; i < _arrlen((void**)cfile); i += 1) {
+    Strings objs = zero(Strings);
+    for (size_t i = 0; i < cfiles.len; i += 1) {
         char *obj;
-        asprintf(&obj, "%s%s", cfile[i], ".o");
+        asprintf(&obj, "%s%s", cfiles.items[i], ".o");
         da_append(&objs, obj);
         
-        // TODO: also use passed cflags
-        ok = compile(cfile[i], obj, strsc("-c", "-fPIC"), NULL);
+        // TODO: also use passed cflags and lflags
+        ok = compile(cfiles.items[i], obj, strs("-c", "-fPIC"), zero(Strings));
         if (!ok)
             goto exit;
     }
 
-    Cmd cmd = { 0 };
-    da_append(&cmd, compiler.name);
-    da_append_many(&cmd, compiler.flags, _arrlen((void**) compiler.flags));
-    if (cflags)
-        da_append_many(&cmd, cflags, _arrlen((void**) cflags));
-    da_append(&cmd, "-shared");
-    da_append(&cmd, "-o");
-    da_append(&cmd, so);
-    da_append_many(&cmd, objs.items, objs.len);
-    if (lflags)
-        da_append_many(&cmd, lflags, _arrlen((void**) lflags));
+    Cmd cmd = zero(Cmd);
+    da_append(&cmd, state.cc);
+    da_expand(&cmd, state.cflags);
+    if (cflags.len)
+        da_expand(&cmd, cflags);
+    da_expand(&cmd, strs("-shared", "-o", so));
+    da_expand(&cmd, objs);
+    if (lflags.len)
+        da_expand(&cmd, lflags);
 
-    Buffer err = { 0 };
+    Buffer err = zero(Buffer);
     ok = !cmd_execw(cmd, NULL, NULL, &err);
     if (!ok)
         msg(LL_Error, "Compilation of '%s' failed:\n%.*s", so, (int) err.len, err.items);
+    if (err.items)
+        free(err.items);
 
 exit:
     if (objs.items) {
-        da_append_many(&ptrs, objs.items, objs.len);
+        da_expand(&state.ptrs, objs);
         register_ptr(objs.items);
     }
     return ok;
 }
 
-bool git_clone(char *repo, char *dest, bool init_submodules)
+// :net :http
+
+Buffer http_get(char *url)
 {
-    bool ok = true;
-
-    Cmd cmd = { 0 };
-    char *clone[] = strs("git", "clone", repo, dest);
-    da_append_many(&cmd, clone, _arrlen((void**)clone));
-
-    if (cmd_exec(cmd)) {
-        msg(LL_Error, "Git clone failed");
-        ok = false;
-        goto exit;
-    }
-
-    if (!init_submodules)
-        goto exit;
-
-    cmd.len = 0;
-    char *submodule[] = strs("git", "-C", dest, "submodule", "update", "--init",
-                          "--recursive");
-    da_append_many(&cmd, submodule, _arrlen((void**)submodule));
-    if (cmd_exec(cmd)) {
-        msg(LL_Error, "Git submodule init failed");
-        ok = false;
-        goto exit;
-    }
-
-exit:
-    if (cmd.items)
-        free(cmd.items);
-    return ok;
+    todo();
 }
 
-bool git_checkout(char *repo, char *target)
+Buffer http_post(char *url, Buffer data)
 {
-    Cmd cmd = { 0 };
-    char *checkout[] = strs("git", "-C", repo, "checkout", target);
-    da_append_many(&cmd, checkout, _arrlen((void**)checkout));
-
-    bool ok = !cmd_exec(cmd);
-    if (!ok) {
-        msg(LL_Error, "Git checkout failed");
-    }
-    if (cmd.items)
-        free(cmd.items);
-    return ok;
-}
-
-bool git_clean(char *repo)
-{
-    Cmd cmd = { 0 };
-    // TODO: which flags specifically??
-    char *clean[] = strs("git", "-C", repo, "clean");
-    da_append_many(&cmd, clean, _arrlen((void**)clean));
-
-    bool ok = !cmd_exec(cmd);
-    if (!ok) {
-        msg(LL_Error, "Git checkout failed");
-        return false;
-    }
-    if (cmd.items)
-        free(cmd.items);
-    return ok;
+    todo();
 }
 
 // :main :handler
@@ -467,7 +580,6 @@ typedef struct {
     char *path;
     void *handle;
     typeof(&setup) setup;
-    typeof(&reload_requested) reload_requested;
     typeof(&run_install) run_install;
     typeof(&cleanup) cleanup;
 } Installer;
@@ -480,22 +592,28 @@ typedef struct {
 
 void init_state()
 {
-    static char *cf[] = { "-ggdb", NULL, };
-
-    min_level = LL_Info;
-    ptrs = (typeof(ptrs)) { 0 };
-    compiler = (typeof(compiler)) { .name = "gcc", .flags = (char**) &cf },
-    dry = false;
+    msg(LL_Debug, "Initializing state");
+    state = (State) {
+        .min_level = LL_Trace,
+        .ptrs = zero(typeof(state.ptrs)),
+        .cc = "gcc", 
+        .cflags = strs("-ggdb"),
+        .dry =  false,
+    };
 }
 
 void cleanup_state()
 {
-    if (ptrs.items) {
-        for (size_t i = 0; i < ptrs.len; i += 1) {
-            if (ptrs.items[i])
-                free(ptrs.items[i]);
+    msg(LL_Debug, "Cleaning state");
+    if (state.ptrs.items) {
+        qsort(state.ptrs.items, state.ptrs.len, sizeof(void*), _ptrcmp);
+        for (size_t i = 0; i < state.ptrs.len; i += 1) {
+            if (i > 0 && state.ptrs.items[i - 1] == state.ptrs.items[i])
+                continue;
+            if (state.ptrs.items[i])
+                free(state.ptrs.items[i]);
         }
-        free(ptrs.items);
+        free(state.ptrs.items);
     }
 }
 
@@ -503,22 +621,22 @@ void cleanup_state()
 __attribute__((nonnull))
 bool load_installer(char *path, char *name, Installer *i)
 {
+    msg(LL_Debug, "Loading: %s at %s", name, path);
     if (i->handle) {
         dlclose(i->handle);
     }
-    *i = (Installer) { 0 };
+    *i = zero(Installer);
     i->path = strdup(path);
     register_ptr(i->path);
     i->name = strdup(name);
     register_ptr(i->name);
 
-    i->handle = dlopen(path, RTLD_NOW);
+    i->handle = dlopen(i->path, RTLD_NOW);
     if (!i->handle) {
         msg(LL_Error, "Failed to open installer: %s", dlerror());
         return false;
     }
     i->setup = dlsym(i->handle, "setup");
-    i->reload_requested = dlsym(i->handle, "reload_requested");
     i->run_install = dlsym(i->handle, "run_install");
     if (!i->run_install) {
         msg(LL_Error, "Failed to find 'run_install' function: %s", dlerror());
@@ -531,44 +649,78 @@ bool load_installer(char *path, char *name, Installer *i)
 
 Installers available_installers()
 {
-    Installers installers = { 0 };
+    Installers installers = zero(Installers);
 
     Strings ls_res;
     if (!ls(".", FF_Directory, &ls_res))
         die("ls failed:");
 
-    Buffer install_name = { 0 };
-    Buffer lib_name = { 0 };
+    Buffer source = zero(Buffer);
+    Buffer target = zero(Buffer);
     static const char *install_c = "/install.c";
     static const char *libinstaller = "/libinstaller.so";
     for (size_t i = 0; i < ls_res.len; i += 1) {
         if (ls_res.items[i][0] == '.')
             continue;
 
-        install_name.len = 0;
-        lib_name.len = 0;
+        source.len = 0;
+        target.len = 0;
 
-        da_append_many(&install_name, ls_res.items[i], strlen(ls_res.items[i]));
-        da_append_many(&install_name, install_c, strlen(install_c) + 1); // +1 copies \0
-        if (!exists(install_name.items, FF_File))
+        da_append_many(&source, ls_res.items[i], strlen(ls_res.items[i]));
+        da_append_many(&source, install_c, strlen(install_c) + 1); // +1 copies \0
+        if (!exists(source.items, FF_File))
             continue;
 
-        da_append_many(&lib_name, ls_res.items[i], strlen(ls_res.items[i]));
-        da_append_many(&lib_name, libinstaller, strlen(libinstaller) + 1); // +1 copies \0
-        if (!compile_so(strsc(install_name.items), lib_name.items, NULL, NULL))
+        da_append_many(&target, ls_res.items[i], strlen(ls_res.items[i]));
+        da_append_many(&target, libinstaller, strlen(libinstaller) + 1); // +1 copies \0
+
+        if (!compile_so(strs(source.items), target.items, zero(Strings), zero(Strings)))
             continue;
 
-        Installer inst = { 0 };
-        if (!load_installer(lib_name.items, ls_res.items[i], &inst))
+        Installer inst = zero(Installer);
+        if (!load_installer(target.items, ls_res.items[i], &inst))
             continue;
         
         da_append(&installers, inst);
     }
 
-    free(install_name.items);
-    free(lib_name.items);
+    free(source.items);
+    free(target.items);
 
     return installers;
+}
+
+// sets name and path in ctx if inst->setup is defined
+bool run_installer(Installer *inst, Context ctx)
+{
+    if (inst->setup) {
+        ctx.name = inst->name;
+        ctx.path = inst->path;
+        SetupResult res = inst->setup(ctx);
+
+        // TODO: should res.ok take priority over res.request_reload?
+        if (res.request_reload) {
+            ctx.reloaded = true;
+            ctx.reload_data = res.reload_data;
+            if (!load_installer(inst->path, inst->name, inst)) {
+                msg(LL_Error, "Installer reload failed");
+                return false;
+            }
+            return run_installer(inst, ctx);
+        }
+
+        if (!res.ok) {
+            msg(LL_Error, "Setup for installer %s failed", inst->name);
+            return false;
+        }
+    }
+
+    bool ok = inst->run_install();
+
+    if (inst->cleanup)
+        inst->cleanup();
+    
+    return ok;
 }
 
 // Steps:
@@ -579,6 +731,7 @@ Installers available_installers()
 // 3. cleanup
 //
 // IDEAS:
+// - dwnld(url, path) requests url and stores result in the file at path
 // - add support for package managers: Instead of having to call pacman the installer
 //   can simply request the installation of some package or query some information
 //   (version, ...)
@@ -587,6 +740,20 @@ int main()
 {
     init_state();
 
+    // Simple test example
+    // Strings ls_res;
+    // if (!ls(".", FF_Any, &ls_res))
+    //     die("ls failed");
+    // da_print(&ls_res, "%s", "\n");
+    // if (!compile_so(strs("darkman/install.c"), strdup("darkman/libinstaller.so"), zero(Strings), zero(Strings)))
+    //     die("compilation failed");
+    // Installer darkman = zero(Installer);
+    // if (!load_installer("darkman/libinstaller.so", "darkman", &darkman))
+    //     die("load failed");
+    // if (!run_installer(&darkman, zero(Context)))
+    //     die("run failed");
+    // msg(LL_Info, "ok");
+
     Installers installers = available_installers();
 
     printf("Available:\n");
@@ -594,17 +761,11 @@ int main()
         printf("  - %s\n", installers.items[i].name);
     }
 
-    // da_print(&ls_res, "%s", "\n");
-    // int idx;
-    // da_find(&ls_res, strcmp, "neovim", &idx);
-    // printf("%d: %s\n", idx, ls_res.items[idx]);
-    //
-    // if (!compile_so(strsc("darkman/install.c"), "darkman/libinstall.so", NULL, NULL))
-    //     die("compilation failed");
-    // Installer darkman = { 0 };
-    // if (!load_installer("darkman/libinstall.so", &darkman))
-    //     die("Could not open the installer");
-    // darkman.run_install();
+    printf("Running installers:\n");
+    for (size_t i = 0; i < installers.len; i += 1) {
+        printf(":: %s \n", installers.items[i].name);
+        run_installer(&installers.items[i], (Context) { 0 });
+    }
 
     cleanup_state();
 }
