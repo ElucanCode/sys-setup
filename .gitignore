@@ -1,3 +1,5 @@
 sys-setup
 */*.o
 */*.so
+dwm/dwm
+dwm/config.h
