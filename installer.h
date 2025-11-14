@@ -167,6 +167,10 @@ INSTALLER_OPTIONAL  void cleanup(void);
 
 // :api
 
+typedef DA_STRUCT(char*) Strings;
+
+typedef DA_STRUCT(char) Buffer;
+
 typedef struct {
     const char *file;
     const char *function;
@@ -196,28 +200,25 @@ typedef enum {
 
 typedef DA_STRUCT(struct ls_file { char *name; File_Filter kind; }) Ls_Files;
 
-typedef struct tree_node {
+typedef struct tree_node Tree_Node;
+typedef DA_STRUCT(Tree_Node) Tree_Nodes;
+struct tree_node {
+    char *name;
+    Tree_Node *parent;
     enum tree_node_kind { TN_Node, TN_Leaf } kind;
     union {
-        struct {
-            struct tree_node *parent;
-            DA_STRUCT(char*) children;
+        struct tree_node_inner {
+            Tree_Nodes children;
         } inner;
-        struct {
-            struct tree_node *parent;
-            char *name;
+        struct tree_node_leaf {
             File_Filter kind;
         } leaf;
     } as;
-} Tree_Node;
+};
 
 typedef bool (*Tree_Node_Filter_fn)(const Tree_Node *node);
 
-typedef DA_STRUCT(char*) Strings;
-
 typedef Strings Cmd;
-
-typedef DA_STRUCT(char) Buffer;
 
 typedef enum {
     IOR_none   = 0,
@@ -293,6 +294,7 @@ __attribute__((nonnull))
 API bool ls(char *dir, int ff, Ls_Files *result);
 
 // @see File_Filter
+// As long as max_depth > 0: FF_Directory is implied.
 API bool tree(char *dir, int ff, size_t max_depth, Tree_Node *result);
 
 // Returns the number of errors. If 0 nothing went wrong.
@@ -301,9 +303,12 @@ API int rm(Strings paths);
 __attribute__((nonnull))
 API bool cp(char *from, char *to);
 
-API bool cp_tree(Tree_Node *from, char *to);
+// API bool cp_tree(Tree_Node *from, char *to);
 
 API bool cp_tree_filter(Tree_Node *from, char *to, Tree_Node_Filter_fn filter);
+
+#define cp_tree(from, to) \
+    cp_tree_filter((from), (to), NULL)
 
 API bool write_all(Fd fd, Buffer bytes);
 

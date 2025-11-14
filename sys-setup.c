@@ -160,7 +160,7 @@ bool ls(char *path, int ff, Ls_Files *result)
 {
     fail_if(*path == '\0', "Empty path");
     fail_if(FF_None == ff, "Empty filter");
-    fail_if(!exists(path, FF_Directory), "No such directory");
+    fail_if(!exists(path, FF_Directory), "No such directory: %s", path);
 
     DIR *dir = opendir(path);
     fail_if(!dir, "Failed to open dir '%s':", path);
@@ -207,9 +207,52 @@ bool ls(char *path, int ff, Ls_Files *result)
     return true;
 }
 
-API bool tree(char *dir, int ff, size_t max_depth, Tree_Node *result)
+bool tree(char *dir, int ff, size_t max_depth, Tree_Node *result)
 {
-    todo();
+    // TODO: This could theoretically be allowed, it would simply yield the
+    //       directory structure without any files. In this case put an early
+    //       `return true` here.
+    fail_if(FF_None == ff, "Empty filter");
+
+    Ls_Files entries = zero(Ls_Files);
+    if (!ls(dir, ff | (max_depth ? FF_Directory : FF_None), &entries))
+        return false; // Error is printed by ls
+    result->name = dir;
+    result->parent = NULL;
+    result->kind = TN_Node;
+    result->as.inner.children = zero(Tree_Nodes);
+
+    for (size_t i = 0; i < entries.len; i += 1) {
+        char *path;
+        asprintf(&path, "%s/%s", dir, entries.items[i].name);
+        register_ptr(path);
+        Tree_Node new_node;
+        if (entries.items[i].kind & FF_Directory) {
+            if (!tree(path, ff, max_depth - 1, &new_node))
+                // TODO: Maybe just continue and accept, that the tree is only partial
+                return false;
+            // new_node.name is set inside the tree call
+        } else {
+            new_node.kind = TN_Leaf;
+            new_node.name = path;
+            new_node.as.leaf.kind = entries.items[i].kind;
+        }
+        new_node.parent = result;
+        da_append(&result->as.inner.children, new_node);
+    }
+    register_ptr(result->as.inner.children.items);
+
+    return true;
+}
+
+void _debug_tree(Tree_Node *tre)
+{
+    printf("%s\n", tre->name);
+    if (tre->kind != TN_Node)
+        return;
+    for (size_t i = 0; i < tre->as.inner.children.len; i += 1) {
+        _debug_tree(&tre->as.inner.children.items[i]);
+    }
 }
 
 int rm(Strings paths)
@@ -245,11 +288,6 @@ bool cp(char *from, char *to)
     if (bytes.items)
         free(bytes.items);
     return ok;
-}
-
-bool cp_tree(Tree_Node *from, char *to)
-{
-    todo();
 }
 
 bool cp_tree_filter(Tree_Node *from, char *to, Tree_Node_Filter_fn filter)
@@ -691,6 +729,8 @@ Installers available_installers()
     size_t failures = 0;
     for (size_t i = 0; i < ls_res.len; i += 1) {
         if (ls_res.items[i].name[0] == '.') {
+            // Hidden must be passed to ls via FF_Hidden, this therefore only serves
+            // for the peace of mind.
             unreachable();
         }
 
@@ -802,11 +842,11 @@ void cleanup_state()
     }
 }
 
-int main()
+int main(int argc, char **argv)
 {
     init_state();
 
-    // Simple test example
+    // :Simple test example:
     // Strings ls_res;
     // if (!ls(".", FF_Any, &ls_res))
     //     die("ls failed");
@@ -820,6 +860,7 @@ int main()
     //     die("run failed");
     // msg(LL_Info, "ok");
 
+    // :List and run all installers:
     Installers installers = available_installers();
 
     printf("Available:\n");
@@ -833,5 +874,7 @@ int main()
         run_installer(&installers.items[i], (Context) { 0 });
     }
 
+    // TODO: Give the user to capability to keep the compiled sys-setup executable
+    rm(strs(argv[0]));
     cleanup_state();
 }
