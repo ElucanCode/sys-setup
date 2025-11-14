@@ -1,4 +1,4 @@
-//usr/bin/env gcc -Wall -rdynamic "$0" -o sys-setup -ldl && exec ./sys-setup "$@"
+//usr/bin/env gcc -DSHEBANG -Wall -rdynamic "$0" -o sys-setup -ldl && exec ./sys-setup "$@"
 
 #include <dirent.h>
 #include <dlfcn.h>
@@ -874,7 +874,9 @@ int main(int argc, char **argv)
         run_installer(&installers.items[i], (Context) { 0 });
     }
 
+#ifdef SHEBANG // defined when compiling with the shebang
     // TODO: Give the user to capability to keep the compiled sys-setup executable
     rm(strs(argv[0]));
+#endif
     cleanup_state();
 }
