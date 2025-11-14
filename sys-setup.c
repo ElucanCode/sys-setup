@@ -18,13 +18,10 @@
 
 // :state
 
-enum {
-// Package managers
-    Pacman   = 1 << 0,  /* implies libalpm */
-
-// Programs
-    Git      = 1 << 8,
-    Curl     = 1 << 9,  /* implies libcurl */
+enum programs {
+    Git,
+    Curl,    /* implies libcurl */
+    NUM_PROGRAMS,
 };
 
 typedef struct {
@@ -81,13 +78,13 @@ void msg_loc(Source_Loc loc, Log_Level ll, char* fmt, ...)
     static const char *PREFIXES[2][_LL_NUM] = {
         {   [LL_Trace] = "TRACE",
             [LL_Debug] = "DEBUG",
-            [LL_Info]  = "INFO",
-            [LL_Warn]  = "WARN",
+            [LL_Info]  = "INFO ",
+            [LL_Warn]  = "WARN ",
             [LL_Error] = "ERROR" },
         {   [LL_Trace] = "\033[37mTRACE\033[0m",
             [LL_Debug] = "\033[36mDEBUG\033[0m",
-            [LL_Info]  = "\033[32mINFO\033[0m",
-            [LL_Warn]  = "\033[33mWARN\033[0m",
+            [LL_Info]  = "\033[32mINFO \033[0m",
+            [LL_Warn]  = "\033[33mWARN \033[0m",
             [LL_Error] = "\033[31mERROR\033[0m" },
     };
 
@@ -104,7 +101,7 @@ void msg_loc(Source_Loc loc, Log_Level ll, char* fmt, ...)
         fputc(' ', stderr);
         perror(NULL);
     } else {
-        fprintf(stderr, "\n");
+        putc('\n', stderr);
     }
     fflush(stderr);
 }
@@ -113,6 +110,11 @@ void register_ptr(void *ptr)
 {
     // TODO: check if ptr is somewhere in the state OR if it already is registered
     da_append(&state.ptrs, ptr);
+}
+
+void register_ptrs(void **ptrs, size_t n)
+{
+    da_append_many(&state.ptrs, ptrs, n);
 }
 
 Strings _strs(char *first, ...)
@@ -128,7 +130,7 @@ Strings _strs(char *first, ...)
     } while ((cur = va_arg(args, char*)));
     va_end(args);
 
-    da_expand(&state.ptrs, res);
+    register_ptrs((void**) res.items, res.len);
     register_ptr(res.items);
     return res;
 }
@@ -137,14 +139,8 @@ Strings _strs(char *first, ...)
 
 int exists(char *path, int ff)
 {
-    if (*path == '\0') {
-        msg(LL_Error, "Empty path");
-        return 0;
-    }
-    if (!ff) {
-        msg(LL_Error, "Empty filter");
-        return 0;
-    }
+    fail_if(*path == '\0', "Empty path");
+    fail_if(FF_None == ff, "Empty filter");
 
     struct stat s;
     if (lstat(path, &s) == -1) {
@@ -157,53 +153,70 @@ int exists(char *path, int ff)
     if (ff & FF_File      && S_ISREG(s.st_mode)) return FF_File;
     if (ff & FF_Directory && S_ISDIR(s.st_mode)) return FF_Directory;
     if (ff & FF_Symlink   && S_ISLNK(s.st_mode)) return FF_Symlink;
-    return 0;
+    return FF_None;
 }
 
-bool ls(char *path, int ff, Strings *result)
+bool ls(char *path, int ff, Ls_Files *result)
 {
-    if (*path == '\0') {
-        msg(LL_Error, "Empty path");
-        return false;
-    }
-    if (!ff) {
-        msg(LL_Error, "Empty filter");
-        return false;
-    }
-    if (!exists(path, FF_Directory)) {
-        msg(LL_Error, "No such directory");
-        return false;
-    }
+    fail_if(*path == '\0', "Empty path");
+    fail_if(FF_None == ff, "Empty filter");
+    fail_if(!exists(path, FF_Directory), "No such directory");
 
     DIR *dir = opendir(path);
-    if (!dir) {
-        msg(LL_Error, "Failed to open dir '%s':", path);
-        return false;
-    }
+    fail_if(!dir, "Failed to open dir '%s':", path);
 
-    *result = zero(Strings);
+    *result = zero(Ls_Files);
     for (struct dirent *ent = readdir(dir); ent != NULL; ent = readdir(dir)) {
-        if ((ent->d_type == DT_REG && (ff & FF_File))
-            || (ent->d_type == DT_DIR && (ff & FF_Directory))
-            || (ent->d_type == DT_LNK && (ff & FF_Symlink)))
-        {
-            char *name = strdup(ent->d_name);
-            da_append(result, name);
+        File_Filter kind = FF_None;
+        const size_t name_len = strlen(ent->d_name);
+
+        if ('.' == ent->d_name[0]) {
+            if (1 == name_len) {
+                if (ff & FF_Current)
+                    kind |= FF_Current;
+                else
+                    continue;
+            } else if (2 == name_len && '.' == ent->d_name[1]) {
+                if (ff & FF_Parent)
+                    kind |= FF_Parent;
+                else
+                    continue;
+            }
+            if (ff & FF_Hidden)
+                kind |= FF_Hidden;
+            else
+                continue;
+        }
+        if (ent->d_type == DT_REG && (ff & FF_File))
+            kind |= FF_File;
+        else if (ent->d_type == DT_DIR && (ff & FF_Directory))
+            kind |= FF_Directory;
+        else if (ent->d_type == DT_LNK && (ff & FF_Symlink))
+            kind |= FF_Symlink;
+
+        if (kind != FF_None) {
+            struct ls_file f = { strdup(ent->d_name), kind };
+            register_ptr(f.name);
+            da_append(result, f);
         }
     }
     closedir(dir);
-    da_expand(&state.ptrs, *result);
     register_ptr(result->items);
     qsort(result->items, result->len, sizeof(*result->items), _strcmp);
 
     return true;
 }
 
+API bool tree(char *dir, int ff, size_t max_depth, Tree_Node *result)
+{
+    todo();
+}
+
 int rm(Strings paths)
 {
     int errs = 0;
     for (size_t i = 0; i < paths.len; i += 1) {
-        if (-1 == remove(paths.items[i]))  {
+        if (-1 == remove(paths.items[i])) {
             msg(LL_Error, "Failed to remove '%s':", paths.items[i]);
             errs += 1;
         }
@@ -214,10 +227,7 @@ int rm(Strings paths)
 bool cp(char *from, char *to)
 {
     Fd rfd = open(from, O_RDONLY);
-    if (rfd == INVALID_FILE_DES) {
-        msg(LL_Error, "Failed to open %s:", from);
-        return false;
-    }
+    fail_if(rfd == INVALID_FILE_DES, "Failed to open %s:", from);
     Fd wfd = open(to, O_CREAT | O_WRONLY | O_TRUNC);
     if (wfd == INVALID_FILE_DES) {
         msg(LL_Error, "Failed to open %s:", to);
@@ -237,15 +247,22 @@ bool cp(char *from, char *to)
     return ok;
 }
 
+bool cp_tree(Tree_Node *from, char *to)
+{
+    todo();
+}
+
+bool cp_tree_filter(Tree_Node *from, char *to, Tree_Node_Filter_fn filter)
+{
+    todo();
+}
+
 bool write_all(Fd fd, Buffer bytes)
 {
     size_t written = 0;
     while (written < bytes.len) {
         ssize_t w = write(fd, bytes.items + written, bytes.len - written);
-        if (-1 == w) {
-            msg(LL_Error, "Failed to write to fd:");
-            return false;
-        }
+        fail_if(-1 == w, "Failed to write to fd:");
         written += w;
     }
     return true;
@@ -296,7 +313,6 @@ Process cmd_execa(Cmd cmd, int redirects)
     msg(LL_Debug, "Running cmd: %s", cmd_str.items);
     free(cmd_str.items);
 
-    // TODO: log the cmd
     // TODO: Exit when something errors?
     int stdin_pipe[2] = { INVALID_FILE_DES, INVALID_FILE_DES };
     if (redirects & IOR_stdin) {
@@ -365,10 +381,7 @@ Process cmd_execa(Cmd cmd, int redirects)
 
 bool prcs_write(Process p, char *in)
 {
-    if (p.stdin_ == INVALID_FILE_DES) {
-        msg(LL_Error, "Can not write to stdin");
-        return false;
-    }
+    fail_if(p.stdin_ == INVALID_FILE_DES, "Can not write to stdin");
 
     const size_t in_len = strlen(in);
     size_t written = 0;
@@ -385,10 +398,7 @@ bool prcs_write(Process p, char *in)
 
 bool prcs_await(Process *p, Buffer *out, Buffer *err)
 {
-    if (-1 == waitpid(p->id, &p->status, 0)) {
-        msg(LL_Error, "Wait failed:");
-        return false;
-    }
+    fail_if(-1 == waitpid(p->id, &p->status, 0), "Wait failed:");
 
     if (!out && !err)
         return true;
@@ -462,12 +472,16 @@ Cmd make(Strings rules, char *in_dir)
 
 Cmd git_clone(char *repo, char *dest_dir, bool init_submodules)
 {
-    todo();
+    Cmd cmd = strs("git", "clone");
+    if (init_submodules)
+        da_expand(&cmd, strs("--recurse-submodules", "-j8"));
+    da_expand(&cmd, strs(repo, dest_dir));
+    return cmd;
 }
 
 Cmd git_checkout(char *repo_dir, char *target)
 {
-    todo();
+    return strs("git", "-C", repo_dir, "checkout", target);
 }
 
 Cmd git_clean(char *repo_dir)
@@ -476,6 +490,37 @@ Cmd git_clean(char *repo_dir)
 }
 
 // :package :installation
+
+bool exe_exists(char *name)
+{ // https://stackoverflow.com/questions/41230547/check-if-program-is-installed-in-c
+    if (strchr(name, '/'))
+        return 0 == access(name, X_OK);
+
+    const char *path = getenv("PATH");
+    fail_if(!path, "Failed to get PATH");
+
+    char *buf = malloc(strlen(path) + strlen(name) + 3);
+    for(; *path; ++path) {
+        char *p = buf;
+        for(; *path && *path!=':'; ++path,++p) {
+            *p = *path;
+        }
+        if(p == buf)
+            *p++ = '.';
+        if(p[-1] != '/')
+            *p++ = '/';
+
+        strcpy(p, name);
+        if(0 == access(buf, X_OK)) {
+            free(buf);
+            return true;
+        }
+        if(!*path)
+            break;
+    }
+    free(buf);
+    return false;
+}
 
 bool is_installed(char *pkg)
 {
@@ -516,13 +561,30 @@ bool compile(char *file, char *out, Strings cflags, Strings lflags)
     if (err.items)
         free(err.items);
 
-    return true;
+    return ok;
 }
 
 bool compile_so(Strings cfiles, char *so, Strings cflags, Strings lflags)
 {
-    // TODO: check if the so file already exists and is up to date
     bool ok = true;
+
+    if (exists(so, FF_File)) {
+        int latest_cfile = 0;
+        struct stat s;
+        for (size_t i = 0; i < cfiles.len; i += 1) {
+            fail_if(-1 == stat(cfiles.items[i], &s),
+                    "Failed to stat file %s:", cfiles.items[i]);
+            int modified = s.st_mtime;
+            if (modified > latest_cfile)
+                latest_cfile = modified;
+        }
+        fail_if(-1 == stat(so, &s),
+                    "Failed to stat so-file %s:", so);
+        if (latest_cfile < s.st_mtime) {
+            msg(LL_Debug, "%s needs no rebuild", so);
+            return true;
+        }
+    }
 
     Strings objs = zero(Strings);
     for (size_t i = 0; i < cfiles.len; i += 1) {
@@ -555,7 +617,7 @@ bool compile_so(Strings cfiles, char *so, Strings cflags, Strings lflags)
 
 exit:
     if (objs.items) {
-        da_expand(&state.ptrs, objs);
+        register_ptrs((void**) objs.items, objs.len);
         register_ptr(objs.items);
     }
     return ok;
@@ -590,33 +652,6 @@ typedef struct {
     size_t cap;
 } Installers;
 
-void init_state()
-{
-    msg(LL_Debug, "Initializing state");
-    state = (State) {
-        .min_level = LL_Trace,
-        .ptrs = zero(typeof(state.ptrs)),
-        .cc = "gcc", 
-        .cflags = strs("-ggdb"),
-        .dry =  false,
-    };
-}
-
-void cleanup_state()
-{
-    msg(LL_Debug, "Cleaning state");
-    if (state.ptrs.items) {
-        qsort(state.ptrs.items, state.ptrs.len, sizeof(void*), _ptrcmp);
-        for (size_t i = 0; i < state.ptrs.len; i += 1) {
-            if (i > 0 && state.ptrs.items[i - 1] == state.ptrs.items[i])
-                continue;
-            if (state.ptrs.items[i])
-                free(state.ptrs.items[i]);
-        }
-        free(state.ptrs.items);
-    }
-}
-
 // If i->handle is not NULL this is equivalent to reloading the installer.
 __attribute__((nonnull))
 bool load_installer(char *path, char *name, Installer *i)
@@ -632,16 +667,10 @@ bool load_installer(char *path, char *name, Installer *i)
     register_ptr(i->name);
 
     i->handle = dlopen(i->path, RTLD_NOW);
-    if (!i->handle) {
-        msg(LL_Error, "Failed to open installer: %s", dlerror());
-        return false;
-    }
+    fail_if(!i->handle, "Failed to open installer: %s", dlerror());
     i->setup = dlsym(i->handle, "setup");
     i->run_install = dlsym(i->handle, "run_install");
-    if (!i->run_install) {
-        msg(LL_Error, "Failed to find 'run_install' function: %s", dlerror());
-        return false;
-    }
+    fail_if(!i->run_install, "Failed to find 'run_install' function: %s", dlerror());
     i->cleanup = dlsym(i->handle, "cleanup");
 
     return true;
@@ -651,7 +680,7 @@ Installers available_installers()
 {
     Installers installers = zero(Installers);
 
-    Strings ls_res;
+    Ls_Files ls_res;
     if (!ls(".", FF_Directory, &ls_res))
         die("ls failed:");
 
@@ -659,30 +688,40 @@ Installers available_installers()
     Buffer target = zero(Buffer);
     static const char *install_c = "/install.c";
     static const char *libinstaller = "/libinstaller.so";
+    size_t failures = 0;
     for (size_t i = 0; i < ls_res.len; i += 1) {
-        if (ls_res.items[i][0] == '.')
-            continue;
+        if (ls_res.items[i].name[0] == '.') {
+            unreachable();
+        }
 
         source.len = 0;
         target.len = 0;
 
-        da_append_many(&source, ls_res.items[i], strlen(ls_res.items[i]));
+        da_append_many(&source, ls_res.items[i].name, strlen(ls_res.items[i].name));
         da_append_many(&source, install_c, strlen(install_c) + 1); // +1 copies \0
-        if (!exists(source.items, FF_File))
+        if (!exists(source.items, FF_File)) // no installer, so we ignore it
             continue;
 
-        da_append_many(&target, ls_res.items[i], strlen(ls_res.items[i]));
+        da_append_many(&target, ls_res.items[i].name, strlen(ls_res.items[i].name));
         da_append_many(&target, libinstaller, strlen(libinstaller) + 1); // +1 copies \0
 
-        if (!compile_so(strs(source.items), target.items, zero(Strings), zero(Strings)))
+        if (!compile_so(strs(source.items), target.items, zero(Strings), zero(Strings))) {
+            failures += 1;
             continue;
+        }
 
         Installer inst = zero(Installer);
-        if (!load_installer(target.items, ls_res.items[i], &inst))
+        if (!load_installer(target.items, ls_res.items[i].name, &inst)) {
+            failures += 1;
             continue;
+        }
         
         da_append(&installers, inst);
     }
+
+    if (0 < failures)
+        msg(LL_Warn, "Failed to load %zu installer%s",
+            failures, 1 == failures ? "" : "s");
 
     free(source.items);
     free(target.items);
@@ -735,6 +774,33 @@ bool run_installer(Installer *inst, Context ctx)
 // - add support for package managers: Instead of having to call pacman the installer
 //   can simply request the installation of some package or query some information
 //   (version, ...)
+
+void init_state()
+{
+    msg(LL_Debug, "Initializing state");
+    state = (State) {
+        .min_level = LL_Trace,
+        .ptrs = zero(typeof(state.ptrs)),
+        .cc = "gcc", 
+        .cflags = strs("-ggdb"),
+        .dry =  false,
+    };
+}
+
+void cleanup_state()
+{
+    msg(LL_Debug, "Cleaning state");
+    if (state.ptrs.items) {
+        qsort(state.ptrs.items, state.ptrs.len, sizeof(void*), _ptrcmp);
+        for (size_t i = 0; i < state.ptrs.len; i += 1) {
+            if (i > 0 && state.ptrs.items[i - 1] == state.ptrs.items[i])
+                continue;
+            if (state.ptrs.items[i])
+                free(state.ptrs.items[i]);
+        }
+        free(state.ptrs.items);
+    }
+}
 
 int main()
 {

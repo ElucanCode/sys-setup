@@ -112,13 +112,15 @@
 
 #define unreachable() die("unreachable")
 #define todo() die("todo")
+#define fail_if(cond, fmt, ...)                                                 \
+    if (cond) {                                                                 \
+        msg(LL_Error, fmt, ##__VA_ARGS__);                                      \
+        return false;                                                           \
+    }
 
 #define src_loc() ((Source_Loc) { __FILE__, __FUNCTION__, __LINE__ })
 #define SRCLOC_FMT "%s@%s:%zu"
 #define SRCLOC_ARG(sl) (sl)->file, (sl)->function, (sl)->line
-
-// #define strs(...) { __VA_ARGS__, NULL }
-// #define strsc(...) (char*[])strs(__VA_ARGS__)
 
 #define INVALID_PID (-1)
 #define INVALID_FILE_DES (-1)
@@ -136,6 +138,7 @@ typedef struct {
 
 typedef DA_STRUCT(Arg) Args;
 
+// TODO: All these values could also be passed using defines when compiling the installer.
 typedef struct {
     char *name;
     char *path;
@@ -152,6 +155,9 @@ typedef struct {
     void *reload_data;
     // TODO: support dependencies?
 } SetupResult;
+
+#define setup_ok() ((SetupResult) { .ok = true })
+#define setup_reload(data) ((SetupResult) { .reload = true, .reload_data = (data) })
 
 INSTALLER_OPTIONAL  SetupResult setup(Context ctx);
 
@@ -176,12 +182,36 @@ typedef enum {
     _LL_NUM,
 } Log_Level;
 
+// Generally used as a include filter
 typedef enum {
+    FF_None      = 0,
     FF_File      = 1 << 0,
     FF_Directory = 1 << 1,
     FF_Symlink   = 1 << 2,
+    FF_Hidden    = 1 << 3,    // Includes
+    FF_Current   = 1 << 8,    // Includes the '.' directory
+    FF_Parent    = 1 << 9,    // Includes the '..' directory
     FF_Any       = ~0,
 } File_Filter;
+
+typedef DA_STRUCT(struct ls_file { char *name; File_Filter kind; }) Ls_Files;
+
+typedef struct tree_node {
+    enum tree_node_kind { TN_Node, TN_Leaf } kind;
+    union {
+        struct {
+            struct tree_node *parent;
+            DA_STRUCT(char*) children;
+        } inner;
+        struct {
+            struct tree_node *parent;
+            char *name;
+            File_Filter kind;
+        } leaf;
+    } as;
+} Tree_Node;
+
+typedef bool (*Tree_Node_Filter_fn)(const Tree_Node *node);
 
 typedef DA_STRUCT(char*) Strings;
 
@@ -234,6 +264,8 @@ API void msg_loc(Source_Loc loc, Log_Level ll, char *fmt, ...);
 // API is already registered.
 __attribute__((nonnull))
 API void register_ptr(void *ptr);
+__attribute__((nonnull))
+API void register_ptrs(void **ptrs, size_t n);
 
 // TODO: a nice way to register a dynamic array especially for for e.g. Strings
 
@@ -258,13 +290,20 @@ API int exists(char *path, int ff);
 
 // @see File_Filter
 __attribute__((nonnull))
-API bool ls(char *dir, int ff, Strings *result);
+API bool ls(char *dir, int ff, Ls_Files *result);
+
+// @see File_Filter
+API bool tree(char *dir, int ff, size_t max_depth, Tree_Node *result);
 
 // Returns the number of errors. If 0 nothing went wrong.
 API int rm(Strings paths);
 
 __attribute__((nonnull))
 API bool cp(char *from, char *to);
+
+API bool cp_tree(Tree_Node *from, char *to);
+
+API bool cp_tree_filter(Tree_Node *from, char *to, Tree_Node_Filter_fn filter);
 
 API bool write_all(Fd fd, Buffer bytes);
 
@@ -306,6 +345,9 @@ API Cmd git_clean(char *repo_dir);
 
 // :package :installation
 
+API bool exe_exists(char *name);
+
+// TODO: Not really sure how to integrate the pgk managers
 API bool is_installed(char *pkg);
 
 // Should be called in `setup`
