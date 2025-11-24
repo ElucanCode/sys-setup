@@ -1,9 +1,12 @@
-//usr/bin/env gcc -DSHEBANG -Wall -rdynamic "$0" -o sys-setup -ldl && exec ./sys-setup "$@"
+//usr/bin/env gcc -ggdb -DSHEBANG -Wall -rdynamic "$0" -o sys-setup -ldl && exec ./sys-setup "$@"
 
+#include <assert.h>
 #include <dirent.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/limits.h>
+#include <getopt.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,21 +28,43 @@ enum programs {
 };
 
 typedef struct {
+    char *name;
+    char *path;
+    void *handle;
+    typeof(&setup) setup;
+    typeof(&run_install) run_install;
+    typeof(&cleanup) cleanup;
+} Installer;
+
+typedef struct {
+    Installer *items;
+    size_t len;
+    size_t cap;
+} Installers;
+
+typedef struct {
     Log_Level min_level;
     DA_STRUCT(void*) ptrs;
     char *cc;
     Strings cflags;
+    Installers available;
 
-    // Only execute one installer after the previous is done
-    bool in_sequence;
     bool dry;
-    // Allow or forbid direct networking
-    bool direct_net;
 } State;
 
 static State state;
 
 // :helper
+
+#define _free(ptr) do { \
+    msg(LL_Trace, "Freeing: %p", ptr); \
+    free(ptr); \
+} while (0);
+
+static int _sizecmp(const void *a, const void *b)
+{
+    return *(ssize_t*)a - *(ssize_t*)b;
+}
 
 static int _strcmp(const void *a, const void *b)
 {
@@ -49,6 +74,14 @@ static int _strcmp(const void *a, const void *b)
 static int _ptrcmp(const void *a, const void *b)
 {
     return a - b;
+}
+
+static int _treenodecmp(const void *a, const void *b)
+{
+    const Tree_Node *ta = a, *tb = b;
+    if (ta->kind == tb->kind)
+        return strcmp(ta->name, tb->name);
+    return (int)ta->kind - (int)tb->kind;
 }
 
 // :installer.h :implementation
@@ -106,24 +139,19 @@ void msg_loc(Source_Loc loc, Log_Level ll, char* fmt, ...)
     fflush(stderr);
 }
 
-void register_ptr(void *ptr)
+void _register_ptr(void *ptr)
 {
     // TODO: check if ptr is somewhere in the state OR if it already is registered
     da_append(&state.ptrs, ptr);
 }
 
-void register_ptrs(void **ptrs, size_t n)
-{
-    da_append_many(&state.ptrs, ptrs, n);
-}
-
-Strings _strs(char *first, ...)
+Strings _strs(const char *first, ...)
 {
     Strings res = zero(Strings);
 
     va_list args;
     va_start(args, first);
-    char *cur = first;
+    char *cur = (char*)first;
     do {
         cur = strdup(cur);
         da_append(&res, cur);
@@ -213,6 +241,7 @@ bool tree(char *dir, int ff, size_t max_depth, Tree_Node *result)
     //       directory structure without any files. In this case put an early
     //       `return true` here.
     fail_if(FF_None == ff, "Empty filter");
+    ff &= FF_Any ^ (FF_Current | FF_Parent);
 
     Ls_Files entries = zero(Ls_Files);
     if (!ls(dir, ff | (max_depth ? FF_Directory : FF_None), &entries))
@@ -220,27 +249,31 @@ bool tree(char *dir, int ff, size_t max_depth, Tree_Node *result)
     result->name = dir;
     result->parent = NULL;
     result->kind = TN_Node;
-    result->as.inner.children = zero(Tree_Nodes);
+    result->children = zero(Tree_Nodes);
+    const char *slash = (dir[strlen(dir) - 1] == '/') ? "" : "/";
 
     for (size_t i = 0; i < entries.len; i += 1) {
         char *path;
-        asprintf(&path, "%s/%s", dir, entries.items[i].name);
+        asprintf(&path, "%s%s%s", dir, slash, entries.items[i].name);
         register_ptr(path);
+
         Tree_Node new_node;
         if (entries.items[i].kind & FF_Directory) {
             if (!tree(path, ff, max_depth - 1, &new_node))
                 // TODO: Maybe just continue and accept, that the tree is only partial
                 return false;
-            // new_node.name is set inside the tree call
+            // NOTE: new_node.name is set inside the tree call
         } else {
             new_node.kind = TN_Leaf;
             new_node.name = path;
-            new_node.as.leaf.kind = entries.items[i].kind;
+            new_node.file_type = entries.items[i].kind;
         }
         new_node.parent = result;
-        da_append(&result->as.inner.children, new_node);
+        da_append(&result->children, new_node);
     }
-    register_ptr(result->as.inner.children.items);
+    qsort(result->children.items, result->children.len,
+          sizeof(*result->children.items), _treenodecmp);
+    register_ptr(result->children.items);
 
     return true;
 }
@@ -250,8 +283,8 @@ void _debug_tree(Tree_Node *tre)
     printf("%s\n", tre->name);
     if (tre->kind != TN_Node)
         return;
-    for (size_t i = 0; i < tre->as.inner.children.len; i += 1) {
-        _debug_tree(&tre->as.inner.children.items[i]);
+    for (size_t i = 0; i < tre->children.len; i += 1) {
+        _debug_tree(&tre->children.items[i]);
     }
 }
 
@@ -269,15 +302,25 @@ int rm(Strings paths)
 
 bool cp(char *from, char *to)
 {
+    struct stat from_stat;
+    fail_if(-1 == stat(from, &from_stat), "Failed to stat file '%s' for copy:", from);
+    // TODO: How?
+    //       1. Same behavior like the cp-command
+    //       2. simply call cp_tree by default
+    if (S_ISDIR(from_stat.st_mode))
+        die("use cp_dir for directories");
     Fd rfd = open(from, O_RDONLY);
     fail_if(rfd == INVALID_FILE_DES, "Failed to open %s:", from);
+
     Fd wfd = open(to, O_CREAT | O_WRONLY | O_TRUNC);
     if (wfd == INVALID_FILE_DES) {
         msg(LL_Error, "Failed to open %s:", to);
         close(rfd);
         return false;
     }
+    fail_if(-1 == fchmod(wfd, from_stat.st_mode), "Failed to copy file permission:");
 
+    // TODO: for bigger files do multiple read-write cycles
     bool ok = false;
     Buffer bytes = read_all(rfd);
     if (bytes.items)
@@ -286,13 +329,67 @@ bool cp(char *from, char *to)
     close(rfd);
     close(wfd);
     if (bytes.items)
-        free(bytes.items);
+        _free(bytes.items);
     return ok;
 }
 
-bool cp_tree_filter(Tree_Node *from, char *to, Tree_Node_Filter_fn filter)
+bool _cp_dir(Tree_Node *from, char *to, Tree_Node_Filter_fn filter,
+             const size_t root_len, const size_t to_len)
 {
-    todo();
+    if (from->kind != TN_Node)
+        die("Should only be called with directories");
+
+    Buffer buf = zero(Buffer);
+    da_append_many(&buf, to, to_len);
+    da_append_many(&buf, from->name + root_len, strlen(from->name) - root_len);
+    da_append(&buf, '\0');
+
+    msg(LL_Trace, "mkdir %.*s", (int) buf.len, buf.items);
+    mkdir(buf.items, 0755);
+
+    bool encountered_node = false;
+    for (size_t i = 0; i < from->children.len; i += 1) {
+        if (filter && !filter(&from->children.items[i]))
+            continue;
+
+        buf.len = to_len;
+        Tree_Node *child = &from->children.items[i];
+        switch (child->kind) {
+        case TN_Leaf:
+            // This assert should never be triggered because `tree(...)` will sort
+            // files before directories.
+            assert(!encountered_node && "Buffer corrupted");
+            da_append_many(&buf, child->name + root_len, strlen(child->name + root_len));
+            da_append(&buf, '\0');
+            msg(LL_Trace, "copy  %s -> %s", child->name, buf.items);
+            cp(child->name, buf.items);
+            break;
+        case TN_Node:
+            encountered_node = true;
+            da_append(&buf, '/');
+            da_append(&buf, '\0');
+            _cp_dir(child, to, filter, root_len, to_len);
+            break;
+        default:
+            unreachable();
+        }
+    }
+    
+    if (buf.items)
+        _free(buf.items);
+    return false;
+}
+
+bool cp_dir(Tree_Node *from, char *to, Tree_Node_Filter_fn filter)
+{
+    if (from->kind != TN_Node) {
+        // TODO: simply call cp or fail?
+        msg(LL_Error, "Not a directory: '%s'", from->name);
+        return false;
+    }
+    size_t root_len = strlen(from->name);
+    const bool ok = _cp_dir(from, to, filter, root_len, strlen(to));
+    return ok;
 }
 
 bool write_all(Fd fd, Buffer bytes)
@@ -329,7 +426,7 @@ Buffer read_all(Fd fd)
 
     if (error) {
         if (buf.items)
-            free(buf.items);
+            _free(buf.items);
         buf = zero(Buffer);
     } else {
         register_ptr(buf.items);
@@ -349,7 +446,7 @@ Process cmd_execa(Cmd cmd, int redirects)
     }
     da_append(&cmd_str, '\0');
     msg(LL_Debug, "Running cmd: %s", cmd_str.items);
-    free(cmd_str.items);
+    _free(cmd_str.items);
 
     // TODO: Exit when something errors?
     int stdin_pipe[2] = { INVALID_FILE_DES, INVALID_FILE_DES };
@@ -550,13 +647,13 @@ bool exe_exists(char *name)
 
         strcpy(p, name);
         if(0 == access(buf, X_OK)) {
-            free(buf);
+            _free(buf);
             return true;
         }
         if(!*path)
             break;
     }
-    free(buf);
+    _free(buf);
     return false;
 }
 
@@ -595,9 +692,9 @@ bool compile(char *file, char *out, Strings cflags, Strings lflags)
             file, (int) err.len, err.items);
 
     if (cmd.items)
-        free(cmd.items);
+        _free(cmd.items);
     if (err.items)
-        free(err.items);
+        _free(err.items);
 
     return ok;
 }
@@ -606,6 +703,8 @@ bool compile_so(Strings cfiles, char *so, Strings cflags, Strings lflags)
 {
     bool ok = true;
 
+    // TODO: Maybe a generic function for a use-case like this
+    // TODO: Remove this up-to-date check from this function
     if (exists(so, FF_File)) {
         int latest_cfile = 0;
         struct stat s;
@@ -651,7 +750,7 @@ bool compile_so(Strings cfiles, char *so, Strings cflags, Strings lflags)
     if (!ok)
         msg(LL_Error, "Compilation of '%s' failed:\n%.*s", so, (int) err.len, err.items);
     if (err.items)
-        free(err.items);
+        _free(err.items);
 
 exit:
     if (objs.items) {
@@ -674,21 +773,6 @@ Buffer http_post(char *url, Buffer data)
 }
 
 // :main :handler
-
-typedef struct {
-    char *name;
-    char *path;
-    void *handle;
-    typeof(&setup) setup;
-    typeof(&run_install) run_install;
-    typeof(&cleanup) cleanup;
-} Installer;
-
-typedef struct {
-    Installer *items;
-    size_t len;
-    size_t cap;
-} Installers;
 
 // If i->handle is not NULL this is equivalent to reloading the installer.
 __attribute__((nonnull))
@@ -745,6 +829,7 @@ Installers available_installers()
         da_append_many(&target, ls_res.items[i].name, strlen(ls_res.items[i].name));
         da_append_many(&target, libinstaller, strlen(libinstaller) + 1); // +1 copies \0
 
+        // TODO: Check here if the installer needs to be rebuild not in the compile_so
         if (!compile_so(strs(source.items), target.items, zero(Strings), zero(Strings))) {
             failures += 1;
             continue;
@@ -763,8 +848,8 @@ Installers available_installers()
         msg(LL_Warn, "Failed to load %zu installer%s",
             failures, 1 == failures ? "" : "s");
 
-    free(source.items);
-    free(target.items);
+    _free(source.items);
+    _free(target.items);
 
     return installers;
 }
@@ -775,7 +860,7 @@ bool run_installer(Installer *inst, Context ctx)
     if (inst->setup) {
         ctx.name = inst->name;
         ctx.path = inst->path;
-        SetupResult res = inst->setup(ctx);
+        Setup_Result res = inst->setup(ctx);
 
         // TODO: should res.ok take priority over res.request_reload?
         if (res.request_reload) {
@@ -815,36 +900,166 @@ bool run_installer(Installer *inst, Context ctx)
 //   can simply request the installation of some package or query some information
 //   (version, ...)
 
-void init_state()
+void init_state(const Log_Level min_lvl)
 {
-    msg(LL_Debug, "Initializing state");
-    state = (State) {
-        .min_level = LL_Trace,
-        .ptrs = zero(typeof(state.ptrs)),
-        .cc = "gcc", 
-        .cflags = strs("-ggdb"),
-        .dry =  false,
-    };
+    state.min_level = min_lvl;
+    state.ptrs = zero(typeof(state.ptrs));
+    state.cc = "gcc";
+    state.cflags = strs("-ggdb");
+    state.available = available_installers();
+    state.dry = false;
 }
 
 void cleanup_state()
 {
-    msg(LL_Debug, "Cleaning state");
+    for (size_t i = 0; i < state.available.len; i += 1) {
+        if (state.available.items[i].handle)
+            dlclose(state.available.items[i].handle);
+    }
+    msg(LL_Debug, "Cleaning state: %zu pointers", state.ptrs.len);
     if (state.ptrs.items) {
         qsort(state.ptrs.items, state.ptrs.len, sizeof(void*), _ptrcmp);
         for (size_t i = 0; i < state.ptrs.len; i += 1) {
             if (i > 0 && state.ptrs.items[i - 1] == state.ptrs.items[i])
                 continue;
             if (state.ptrs.items[i])
-                free(state.ptrs.items[i]);
+                _free(state.ptrs.items[i]);
         }
-        free(state.ptrs.items);
+        _free(state.ptrs.items);
     }
+}
+
+struct arg_options {
+    bool list;
+    Log_Level ll;
+    bool exit;
+};
+
+struct arg_options parse_args(const int argc, char **argv)
+{
+    struct arg_options opts = {
+        .list = false,
+        .ll = LL_Warn,
+        .exit = false,
+    };
+    const char *prog = *argv;
+
+    while (1) {
+        int opt_idx;
+
+        static struct option options[] = {
+            { "help",            no_argument,       0, 'h' },
+            { "verbose",         optional_argument, 0, 'v' },
+            { "list-installers", no_argument,       0, 'l' },
+            { 0,                 0,                 0,  0  },
+        };
+        int c = getopt_long(argc, argv, "hv:l",
+                            options, &opt_idx);
+
+        if (c == -1)
+            return opts;
+
+        switch (c) {
+            case 'h': // :help
+                printf(
+                    "Usage:\n"
+                    "   %s [OPTION...] [INSTALLER...]\n"
+                    "\n"
+                    "Options:\n"
+                    "  -h, --help               - print this help message and exit\n"
+                    "  -v, --verbose[=LEVEL]    - possible values: trace, debug, info, warn, error\n"
+                    "                             By default: warn\n"
+                    "                             When passing without specific level: info\n"
+                    "  -l, --list-installers    - list all available installers and exit\n"
+                    , prog
+                );
+                opts.exit = true;
+                return opts;
+
+            case 'v': // :verbose
+                if (optarg) {
+                    if (strcmp(optarg, "trace") == 0)
+                        opts.ll = LL_Trace;
+                    else if (strcmp(optarg, "debug") == 0)
+                        opts.ll = LL_Debug;
+                    else if (strcmp(optarg, "info") == 0)
+                        opts.ll = LL_Info;
+                    else if (strcmp(optarg, "warn") == 0) 
+                        opts.ll = LL_Warn;
+                    else if (strcmp(optarg, "error") == 0) 
+                        opts.ll = LL_Error;
+                    else
+                        die("Unknown verbosity level: %s", optarg);
+                } else {
+                    opts.ll = LL_Info;
+                }
+                break;
+
+            case 'l': // :list-installers
+                opts.list = true;
+                break;
+
+            default: 
+                die("'getopt_long' returned garbage: %c (0x%X)", c, c);
+        }
+    }
+    unreachable();
 }
 
 int main(int argc, char **argv)
 {
-    init_state();
+    const char *prog = argv[0];
+    struct arg_options opts = parse_args(argc, argv);
+    if (opts.exit)
+        return 0;
+
+    init_state(opts.ll);
+
+    if (opts.list) {
+        printf("Available installers:\n");
+        for (size_t i = 0; i < state.available.len; i += 1) {
+            printf("- %s\n", state.available.items[i].name);
+        }
+        goto exit;
+    }
+
+    Sizes to_run = zero(Sizes);
+    for (size_t i = optind; i < argc; i += 1) {
+        msg(LL_Debug, "Checking if installer %s exists", argv[i]);
+        ssize_t idx = -1;
+        for (size_t j = 0; j < state.available.len; j += 1) {
+            if (0 == strcmp(argv[i], state.available.items[j].name)) {
+                idx = j;
+                break;
+            }
+        }
+        if (-1 == idx) {
+            die("No installer found for: %s", argv[i]);
+        }
+        da_append(&to_run, (size_t) idx);
+    }
+
+    if (0 == to_run.len) {
+        for (size_t i = 0; i < state.available.len; i += 1)
+            da_append(&to_run, i);
+    }
+
+    qsort(to_run.items, to_run.len, sizeof(*to_run.items), _sizecmp);
+
+    if (state.min_level <= LL_Debug) {
+        msg(LL_Debug, "Running following installers: ");
+        for (size_t i = 0; i < to_run.len; i += 1)
+            printf("- %s\n", state.available.items[to_run.items[i]].name);
+    }
+
+exit:
+#ifdef SHEBANG // defined when compiling with the shebang
+    // TODO: Give the user the capability to keep the compiled sys-setup executable
+    rm(strs(prog));
+#endif
+    cleanup_state();
+    printf("\nSo long, and thanks for all the fish!\n");
+    return 0;
 
     // :Simple test example:
     // Strings ls_res;
@@ -861,22 +1076,28 @@ int main(int argc, char **argv)
     // msg(LL_Info, "ok");
 
     // :List and run all installers:
-    Installers installers = available_installers();
 
-    printf("Available:\n");
-    for (size_t i = 0; i < installers.len; i += 1) {
-        printf("  - %s\n", installers.items[i].name);
-    }
+    // printf("Available:\n");
+    // for (size_t i = 0; i < available.len; i += 1) {
+    //     printf("  - %s\n", available.items[i].name);
+    // }
+    //
+    // printf("Running test installer\n");
+    // for (size_t i = 0; i < available.len; i += 1) {
+    //     if (strcmp(available.items[i].name, "test") != 0)
+    //         continue;
+    //     run_installer(&available.items[i], zero(Context));
+    //     break;
+    // }
 
-    printf("Running installers:\n");
-    for (size_t i = 0; i < installers.len; i += 1) {
-        printf(":: %s \n", installers.items[i].name);
-        run_installer(&installers.items[i], (Context) { 0 });
-    }
+    // Tree_Node root;
+    // tree("./dwm/", FF_File, 10, &root);
+    // // _debug_tree(&root);
+    // cp_dir(&root, "/home/elucan/dwm", NULL);
 
-#ifdef SHEBANG // defined when compiling with the shebang
-    // TODO: Give the user to capability to keep the compiled sys-setup executable
-    rm(strs(argv[0]));
-#endif
-    cleanup_state();
+    // printf("Running installers:\n");
+    // for (size_t i = 0; i < installers.len; i += 1) {
+    //     printf(":: %s \n", installers.items[i].name);
+    //     run_installer(&installers.items[i], (Context) { 0 });
+    // }
 }

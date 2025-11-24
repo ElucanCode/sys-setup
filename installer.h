@@ -18,6 +18,7 @@
 #define DA_STRUCT(item_ty) struct { item_ty *items; size_t len, cap; }
 
 #define zero(ty) ((ty) { 0 })
+#define shift(arr, len) (assert((len) > 0 && "Can't shift the array any more"), (len) -= 1, *(arr)++)
 
 // adapted from: https://github.com/tsoding/nob.h
 #define da_reserve(da, space) do {                                              \
@@ -82,7 +83,7 @@
 } while (0);
 
 #define da_insert_swap(da, idx, item)                                           \
-    die("TODO")
+    todo()
 
 #define da_insert_shift(da, idx, item) do {                                     \
     if ((da)->len <= (idx)) {                                                   \
@@ -94,6 +95,7 @@
 } while (0);
 
 // expects 0 for the correct result, this way cmp functions can be used
+// find_fn is a common comparison of type: int(a, b)
 #define da_find(da, find_fn, find_data, idx_ptr) do {                           \
     *(idx_ptr) = -1;                                                            \
     for (ssize_t _i_ = 0; _i_ < (da)->len; _i_ += 1) {                          \
@@ -111,7 +113,7 @@
 } while (0);
 
 #define unreachable() die("unreachable")
-#define todo() die("todo")
+#define todo(...) die("[TODO] " __VA_ARGS__)
 #define fail_if(cond, fmt, ...)                                                 \
     if (cond) {                                                                 \
         msg(LL_Error, fmt, ##__VA_ARGS__);                                      \
@@ -154,12 +156,12 @@ typedef struct {
     bool request_reload;
     void *reload_data;
     // TODO: support dependencies?
-} SetupResult;
+} Setup_Result;
 
-#define setup_ok() ((SetupResult) { .ok = true })
-#define setup_reload(data) ((SetupResult) { .reload = true, .reload_data = (data) })
+#define setup_ok() ((Setup_Result) { .ok = true })
+#define setup_reload(data) ((Setup_Result) { .reload = true, .reload_data = (data) })
 
-INSTALLER_OPTIONAL  SetupResult setup(Context ctx);
+INSTALLER_OPTIONAL  Setup_Result setup(Context ctx);
 
 INSTALLER_NECESSARY bool run_install(void);
 
@@ -168,8 +170,9 @@ INSTALLER_OPTIONAL  void cleanup(void);
 // :api
 
 typedef DA_STRUCT(char*) Strings;
-
 typedef DA_STRUCT(char) Buffer;
+typedef DA_STRUCT(size_t) Sizes;
+typedef DA_STRUCT(int) Ints;
 
 typedef struct {
     const char *file;
@@ -192,7 +195,8 @@ typedef enum {
     FF_File      = 1 << 0,
     FF_Directory = 1 << 1,
     FF_Symlink   = 1 << 2,
-    FF_Hidden    = 1 << 3,    // Includes
+    FF_Hidden    = 1 << 3,    // Includes files starting with a '.'
+    // TODO: Executable?
     FF_Current   = 1 << 8,    // Includes the '.' directory
     FF_Parent    = 1 << 9,    // Includes the '..' directory
     FF_Any       = ~0,
@@ -205,15 +209,11 @@ typedef DA_STRUCT(Tree_Node) Tree_Nodes;
 struct tree_node {
     char *name;
     Tree_Node *parent;
-    enum tree_node_kind { TN_Node, TN_Leaf } kind;
+    enum tree_node_kind { TN_Leaf, TN_Node, } kind;
     union {
-        struct tree_node_inner {
-            Tree_Nodes children;
-        } inner;
-        struct tree_node_leaf {
-            File_Filter kind;
-        } leaf;
-    } as;
+        Tree_Nodes children;
+        File_Filter file_type;
+    };
 };
 
 typedef bool (*Tree_Node_Filter_fn)(const Tree_Node *node);
@@ -264,15 +264,20 @@ API void msg_loc(Source_Loc loc, Log_Level ll, char *fmt, ...);
 // You may assume, that every pointer you receive through any function marked as
 // API is already registered.
 __attribute__((nonnull))
-API void register_ptr(void *ptr);
-__attribute__((nonnull))
-API void register_ptrs(void **ptrs, size_t n);
+API void _register_ptr(void *ptr);
 
-// TODO: a nice way to register a dynamic array especially for for e.g. Strings
+#define register_ptr(ptr) do {                                                  \
+    msg(LL_Trace, "Registered pointer %p", (ptr));                              \
+    _register_ptr(ptr);                                                         \
+} while(0);
+
+#define register_ptrs(ptrs, n) for (size_t _i_ = 0; _i_ < (n); _i_ += 1) { \
+    register_ptr((ptrs)[_i_]); \
+}
 
 // Assumes, that the variadic always ends with `NULL` and only contains `char*`
 __attribute__((nonnull(1)))
-API Strings _strs(char *first, ...);
+API Strings _strs(const char *first, ...);
 
 #define strs(first, ...) \
     _strs((first), ##__VA_ARGS__, NULL)
@@ -295,6 +300,7 @@ API bool ls(char *dir, int ff, Ls_Files *result);
 
 // @see File_Filter
 // As long as max_depth > 0: FF_Directory is implied.
+// FF_Current and FF_Parent are always ignored.
 API bool tree(char *dir, int ff, size_t max_depth, Tree_Node *result);
 
 // Returns the number of errors. If 0 nothing went wrong.
@@ -303,12 +309,8 @@ API int rm(Strings paths);
 __attribute__((nonnull))
 API bool cp(char *from, char *to);
 
-// API bool cp_tree(Tree_Node *from, char *to);
-
-API bool cp_tree_filter(Tree_Node *from, char *to, Tree_Node_Filter_fn filter);
-
-#define cp_tree(from, to) \
-    cp_tree_filter((from), (to), NULL)
+__attribute__((nonnull(1, 2)))
+API bool cp_dir(Tree_Node *from, char *to, Tree_Node_Filter_fn filter);
 
 API bool write_all(Fd fd, Buffer bytes);
 
