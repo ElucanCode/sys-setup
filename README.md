@@ -25,6 +25,6 @@ Extremely easy!
 2. Create a `install.c` file inside this directory and copy any files you would
    like to install using this installer here.
 3. The `install.c` file has to implement all functions marked with `INSTALLER_NECESSARY`
-   inside `install.c` and may implement every `INSTALLER_OPTIONAL` function.
+   inside `installer.h` and may implement every `INSTALLER_OPTIONAL` function.
 4. Write all your installation code inside the `run_install` function.
 5. Done! `sys-setup` will automagically pick your installer up.
