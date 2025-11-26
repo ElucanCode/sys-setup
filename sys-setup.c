@@ -1108,44 +1108,4 @@ exit:
     cleanup_state();
     printf("\nSo long, and thanks for all the fish!\n");
     return 0;
-
-    // :Simple test example:
-    // Strings ls_res;
-    // if (!ls(".", FF_Any, &ls_res))
-    //     die("ls failed");
-    // da_print(&ls_res, "%s", "\n");
-    // if (!compile_so(strs("darkman/install.c"), strdup("darkman/libinstaller.so"), zero(Strings), zero(Strings)))
-    //     die("compilation failed");
-    // Installer darkman = zero(Installer);
-    // if (!load_installer("darkman/libinstaller.so", "darkman", &darkman))
-    //     die("load failed");
-    // if (!run_installer(&darkman, zero(Context)))
-    //     die("run failed");
-    // msg(LL_Info, "ok");
-
-    // :List and run all installers:
-
-    // printf("Available:\n");
-    // for (size_t i = 0; i < available.len; i += 1) {
-    //     printf("  - %s\n", available.items[i].name);
-    // }
-    //
-    // printf("Running test installer\n");
-    // for (size_t i = 0; i < available.len; i += 1) {
-    //     if (strcmp(available.items[i].name, "test") != 0)
-    //         continue;
-    //     run_installer(&available.items[i], zero(Context));
-    //     break;
-    // }
-
-    // Tree_Node root;
-    // tree("./dwm/", FF_File, 10, &root);
-    // // _debug_tree(&root);
-    // cp_dir(&root, "/home/elucan/dwm", NULL);
-
-    // printf("Running installers:\n");
-    // for (size_t i = 0; i < installers.len; i += 1) {
-    //     printf(":: %s \n", installers.items[i].name);
-    //     run_installer(&installers.items[i], (Context) { 0 });
-    // }
 }
