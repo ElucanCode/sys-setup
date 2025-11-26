@@ -1,6 +1,7 @@
 //usr/bin/env gcc -ggdb -DSHEBANG -Wall -rdynamic "$0" -o sys-setup -ldl && exec ./sys-setup "$@"
 
 #include <assert.h>
+#include <ctype.h>
 #include <dirent.h>
 #include <dlfcn.h>
 #include <errno.h>
@@ -161,6 +162,26 @@ Strings _strs(const char *first, ...)
     register_ptrs((void**) res.items, res.len);
     register_ptr(res.items);
     return res;
+}
+
+void prompt(char *p, Buffer *buf)
+{
+    printf("%s", p);
+    fflush(stdout);
+    char c;
+    while (fread(&c, 1, 1, stdin)) {
+        if ('\n' == c)
+            break;
+        da_append(buf, c);
+    }
+    da_append(buf, '\0');
+}
+
+void to_lower(char *str)
+{
+    for (; *str; str += 1) {
+        *str = tolower(*str);
+    }
 }
 
 // :file :path :fs
@@ -693,8 +714,6 @@ bool compile(char *file, char *out, Strings cflags, Strings lflags)
 
     if (cmd.items)
         _free(cmd.items);
-    if (err.items)
-        _free(err.items);
 
     return ok;
 }
@@ -749,8 +768,6 @@ bool compile_so(Strings cfiles, char *so, Strings cflags, Strings lflags)
     ok = !cmd_execw(cmd, NULL, NULL, &err);
     if (!ok)
         msg(LL_Error, "Compilation of '%s' failed:\n%.*s", so, (int) err.len, err.items);
-    if (err.items)
-        _free(err.items);
 
 exit:
     if (objs.items) {
@@ -930,9 +947,11 @@ void cleanup_state()
 }
 
 struct arg_options {
-    bool list;
-    Log_Level ll;
     bool exit;
+    Log_Level ll;
+
+    bool list;
+    bool confirm;
 };
 
 struct arg_options parse_args(const int argc, char **argv)
@@ -951,9 +970,10 @@ struct arg_options parse_args(const int argc, char **argv)
             { "help",            no_argument,       0, 'h' },
             { "verbose",         optional_argument, 0, 'v' },
             { "list-installers", no_argument,       0, 'l' },
-            { 0,                 0,                 0,  0  },
+            { "confirm",         no_argument,       0, 'c' },
+            { 0,                 0,                 0, 0  },
         };
-        int c = getopt_long(argc, argv, "hv:l",
+        int c = getopt_long(argc, argv, "hv;lc",
                             options, &opt_idx);
 
         if (c == -1)
@@ -971,6 +991,7 @@ struct arg_options parse_args(const int argc, char **argv)
                     "                             By default: warn\n"
                     "                             When passing without specific level: info\n"
                     "  -l, --list-installers    - list all available installers and exit\n"
+                    "  -c, --confirm            - asks for confirmation before running any installer\n"
                     , prog
                 );
                 opts.exit = true;
@@ -999,6 +1020,10 @@ struct arg_options parse_args(const int argc, char **argv)
                 opts.list = true;
                 break;
 
+            case 'c': // :confirm
+                opts.confirm = true;
+                break;
+
             default: 
                 die("'getopt_long' returned garbage: %c (0x%X)", c, c);
         }
@@ -1009,7 +1034,7 @@ struct arg_options parse_args(const int argc, char **argv)
 int main(int argc, char **argv)
 {
     const char *prog = argv[0];
-    struct arg_options opts = parse_args(argc, argv);
+    const struct arg_options opts = parse_args(argc, argv);
     if (opts.exit)
         return 0;
 
@@ -1050,6 +1075,29 @@ int main(int argc, char **argv)
         msg(LL_Debug, "Running following installers: ");
         for (size_t i = 0; i < to_run.len; i += 1)
             printf("- %s\n", state.available.items[to_run.items[i]].name);
+    }
+
+    if (opts.confirm) {
+        bool confirmed = false;
+        Buffer buf = zero(Buffer);
+        while (!confirmed) {
+            prompt("Run installers [Y/n] ", &buf);
+            to_lower(buf.items);
+            if (strcmp("n", buf.items) == 0 || strcmp("no", buf.items) == 0) {
+                printf("No confirmation, exiting\n");
+                goto exit;
+            }
+            confirmed = (buf.items[0] == '\0' || strcmp("y", buf.items) == 0
+                            || strcmp("yes", buf.items) == 0);
+            if (!confirmed)
+                msg(LL_Error, "Invalid input: '%s'", buf.items);
+        }
+    }
+
+    for (size_t i = 0; i < to_run.len; i += 1) {
+        Installer *inst = &state.available.items[to_run.items[i]];
+        printf(":: Running %s\n", inst->name);
+        run_installer(inst, zero(Context));
     }
 
 exit:

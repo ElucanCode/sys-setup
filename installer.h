@@ -282,6 +282,10 @@ API Strings _strs(const char *first, ...);
 #define strs(first, ...) \
     _strs((first), ##__VA_ARGS__, NULL)
 
+API void promt(char *p, Buffer *buf);
+
+API void to_lower(char *str);
+
 // :file :path :fs
 // Functionality offered by libc:
 // - chmod(path, mode)
@@ -327,11 +331,13 @@ API bool prcs_write(Process p, char *in);
 
 // Return value of true just means, that the process is not running anymore.
 // For information about how it stopped use p->status.
+// NOTE: .item pointers for out and err will already be registered for later freeing.
 __attribute__((nonnull(1)))
 API bool prcs_await(Process *p, Buffer *out, Buffer *err);
 
 // Returns the exit code or -1 if anything went wrong and/or the process exited
 // abnormally.
+// NOTE: .item pointers for out and err will already be registered for later freeing.
 API int cmd_execw(Cmd cmd, char *in, Buffer *out, Buffer *err);
 
 #define cmd_exec(cmd) \
