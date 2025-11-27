@@ -1031,23 +1031,8 @@ struct arg_options parse_args(const int argc, char **argv)
     unreachable();
 }
 
-int main(int argc, char **argv)
+Sizes installers_to_run(const int argc, char **argv)
 {
-    const char *prog = argv[0];
-    const struct arg_options opts = parse_args(argc, argv);
-    if (opts.exit)
-        return 0;
-
-    init_state(opts.ll);
-
-    if (opts.list) {
-        printf("Available installers:\n");
-        for (size_t i = 0; i < state.available.len; i += 1) {
-            printf("- %s\n", state.available.items[i].name);
-        }
-        goto exit;
-    }
-
     Sizes to_run = zero(Sizes);
     for (size_t i = optind; i < argc; i += 1) {
         msg(LL_Debug, "Checking if installer %s exists", argv[i]);
@@ -1070,34 +1055,64 @@ int main(int argc, char **argv)
     }
 
     qsort(to_run.items, to_run.len, sizeof(*to_run.items), _sizecmp);
+    return to_run;
+}
 
-    if (state.min_level <= LL_Debug) {
-        msg(LL_Debug, "Running following installers: ");
+bool confirm_installers()
+{
+    bool confirmed = false;
+    Buffer buf = zero(Buffer);
+
+    do {
+        prompt("Run installers [Y/n] ", &buf);
+        to_lower(buf.items);
+        if (strcmp("n", buf.items) == 0 || strcmp("no", buf.items) == 0) {
+            printf("No confirmation, exiting\n");
+            break;
+        }
+        confirmed = (buf.items[0] == '\0' || strcmp("y", buf.items) == 0
+                        || strcmp("yes", buf.items) == 0);
+        if (!confirmed)
+            msg(LL_Error, "Invalid input: '%s'", buf.items);
+    } while (!confirmed);
+
+    _free(buf.items);
+    return confirmed;
+}
+
+int main(int argc, char **argv)
+{
+    const char *prog = argv[0];
+    const struct arg_options opts = parse_args(argc, argv);
+    if (opts.exit)
+        return 0;
+
+    init_state(opts.ll);
+
+    if (opts.list) {
+        printf("Available installers:\n");
+        for (size_t i = 0; i < state.available.len; i += 1) {
+            printf("- %s\n", state.available.items[i].name);
+        }
+        goto exit;
+    }
+
+    Sizes to_run = installers_to_run(argc, argv);
+
+    if (opts.confirm || state.min_level <= LL_Debug) {
+        printf("Running following installers:\n");
         for (size_t i = 0; i < to_run.len; i += 1)
             printf("- %s\n", state.available.items[to_run.items[i]].name);
     }
 
-    if (opts.confirm) {
-        bool confirmed = false;
-        Buffer buf = zero(Buffer);
-        while (!confirmed) {
-            prompt("Run installers [Y/n] ", &buf);
-            to_lower(buf.items);
-            if (strcmp("n", buf.items) == 0 || strcmp("no", buf.items) == 0) {
-                printf("No confirmation, exiting\n");
-                goto exit;
-            }
-            confirmed = (buf.items[0] == '\0' || strcmp("y", buf.items) == 0
-                            || strcmp("yes", buf.items) == 0);
-            if (!confirmed)
-                msg(LL_Error, "Invalid input: '%s'", buf.items);
-        }
+    if (opts.confirm && !confirm_installers()) {
+        goto exit;
     }
 
     for (size_t i = 0; i < to_run.len; i += 1) {
         Installer *inst = &state.available.items[to_run.items[i]];
         printf(":: Running %s\n", inst->name);
-        run_installer(inst, zero(Context));
+        // run_installer(inst, zero(Context));
     }
 
 exit:
