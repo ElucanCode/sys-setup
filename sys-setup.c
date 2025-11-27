@@ -45,15 +45,18 @@ typedef struct {
 
 typedef struct {
     Log_Level min_level;
+    bool log_loc;
     DA_STRUCT(void*) ptrs;
     char *cc;
     Strings cflags;
     Installers available;
 
     bool dry;
+    // When set to true cmd_exec* will still execute the commands.
+    bool dry_allow_commands;
 } State;
 
-static State state;
+static State state = zero(State);
 
 // :helper
 
@@ -125,8 +128,12 @@ void msg_loc(Source_Loc loc, Log_Level ll, char* fmt, ...)
     if (ll < state.min_level)
         return;
 
-    fprintf(stderr, "[%s] "SRCLOC_FMT": ",
-            PREFIXES[isatty(STDERR_FILENO)][ll], SRCLOC_ARG(&loc));
+    if (state.log_loc)
+        fprintf(stderr, "[%s] "SRCLOC_FMT": ",
+                PREFIXES[isatty(STDERR_FILENO)][ll], SRCLOC_ARG(&loc));
+    else
+        fprintf(stderr, "[%s] ",
+                PREFIXES[isatty(STDERR_FILENO)][ll]);
     va_list args;
     va_start(args, fmt);
     vfprintf(stderr, fmt, args);
@@ -311,6 +318,12 @@ void _debug_tree(Tree_Node *tre)
 
 int rm(Strings paths)
 {
+    if (state.dry) {
+        for (size_t i = 0; i < paths.len; i += 1)
+            msg(LL_Info, "Removing '%s'", paths.items[i]);
+        return 0;
+    }
+
     int errs = 0;
     for (size_t i = 0; i < paths.len; i += 1) {
         if (-1 == remove(paths.items[i])) {
@@ -323,6 +336,7 @@ int rm(Strings paths)
 
 bool cp(char *from, char *to)
 {
+
     struct stat from_stat;
     fail_if(-1 == stat(from, &from_stat), "Failed to stat file '%s' for copy:", from);
     // TODO: How?
@@ -330,6 +344,12 @@ bool cp(char *from, char *to)
     //       2. simply call cp_tree by default
     if (S_ISDIR(from_stat.st_mode))
         die("use cp_dir for directories");
+
+    if (state.dry) {
+        msg(LL_Info, "Copying '%s' -> '%s'", from, to);
+        return true;
+    }
+
     Fd rfd = open(from, O_RDONLY);
     fail_if(rfd == INVALID_FILE_DES, "Failed to open %s:", from);
 
@@ -365,8 +385,10 @@ bool _cp_dir(Tree_Node *from, char *to, Tree_Node_Filter_fn filter,
     da_append_many(&buf, from->name + root_len, strlen(from->name) - root_len);
     da_append(&buf, '\0');
 
-    msg(LL_Trace, "mkdir %.*s", (int) buf.len, buf.items);
-    mkdir(buf.items, 0755);
+    if (state.dry)
+        msg(LL_Info, "mkdir %.*s", (int) buf.len, buf.items);
+    else
+        mkdir(buf.items, 0755);
 
     bool encountered_node = false;
     for (size_t i = 0; i < from->children.len; i += 1) {
@@ -382,7 +404,6 @@ bool _cp_dir(Tree_Node *from, char *to, Tree_Node_Filter_fn filter,
             assert(!encountered_node && "Buffer corrupted");
             da_append_many(&buf, child->name + root_len, strlen(child->name + root_len));
             da_append(&buf, '\0');
-            msg(LL_Trace, "copy  %s -> %s", child->name, buf.items);
             cp(child->name, buf.items);
             break;
         case TN_Node:
@@ -415,6 +436,11 @@ bool cp_dir(Tree_Node *from, char *to, Tree_Node_Filter_fn filter)
 
 bool write_all(Fd fd, Buffer bytes)
 {
+    if (state.dry) {
+        msg(LL_Info, "Writing %zu bytes to fd %d", bytes.len, fd);
+        return true;
+    }
+
     size_t written = 0;
     while (written < bytes.len) {
         ssize_t w = write(fd, bytes.items + written, bytes.len - written);
@@ -466,8 +492,15 @@ Process cmd_execa(Cmd cmd, int redirects)
         da_append(&cmd_str, ' ');
     }
     da_append(&cmd_str, '\0');
-    msg(LL_Debug, "Running cmd: %s", cmd_str.items);
+    if (strcmp(cmd.items[0], "sudo") == 0)
+        msg(LL_Warn, "Running sudo cmd: %s", cmd_str.items);
+    else 
+        msg(state.dry ? LL_Info : LL_Debug, "Running cmd: %s", cmd_str.items);
     _free(cmd_str.items);
+
+    if (state.dry && !state.dry_allow_commands) {
+        return PSEUDO_PROCESS;
+    }
 
     // TODO: Exit when something errors?
     int stdin_pipe[2] = { INVALID_FILE_DES, INVALID_FILE_DES };
@@ -605,6 +638,10 @@ int cmd_execw(Cmd cmd, char *in, Buffer *out, Buffer *err)
         // NOTE: Ignoring error because we still need to wait for the process
         prcs_write(p, in);
     }
+
+    if (state.dry && !state.dry_allow_commands)
+        return 0;
+
     if (!prcs_await(&p, out, err))
         return -1;
     return WIFEXITED(p.status) ? WEXITSTATUS(p.status) : -1;
@@ -917,14 +954,28 @@ bool run_installer(Installer *inst, Context ctx)
 //   can simply request the installation of some package or query some information
 //   (version, ...)
 
-void init_state(const Log_Level min_lvl)
+struct arg_options {
+    bool exit;
+    Log_Level ll;
+    bool log_loc;
+    bool dry;
+    bool dry_commands;
+
+    bool list;
+    bool confirm;
+};
+
+void init_state(const struct arg_options *opts)
 {
-    state.min_level = min_lvl;
+    state.min_level = opts->ll;
+    state.log_loc = opts->log_loc;
     state.ptrs = zero(typeof(state.ptrs));
     state.cc = "gcc";
     state.cflags = strs("-ggdb");
+    // NOTE: dry is not set yet so the compilation commands will actually go through
     state.available = available_installers();
-    state.dry = false;
+    state.dry = opts->dry;
+    state.dry_allow_commands = opts->dry_commands;
 }
 
 void cleanup_state()
@@ -946,22 +997,15 @@ void cleanup_state()
     }
 }
 
-struct arg_options {
-    bool exit;
-    Log_Level ll;
-
-    bool list;
-    bool confirm;
-};
-
 struct arg_options parse_args(const int argc, char **argv)
 {
+    // TODO: move away from getopt as it is kinda weird
     struct arg_options opts = {
-        .list = false,
         .ll = LL_Warn,
-        .exit = false,
+        .log_loc = true,
     };
     const char *prog = *argv;
+    bool verbosity_set = false;
 
     while (1) {
         int opt_idx;
@@ -969,11 +1013,14 @@ struct arg_options parse_args(const int argc, char **argv)
         static struct option options[] = {
             { "help",            no_argument,       0, 'h' },
             { "verbose",         optional_argument, 0, 'v' },
+            { "no-location",     no_argument,       0, 'L' },
             { "list-installers", no_argument,       0, 'l' },
             { "confirm",         no_argument,       0, 'c' },
-            { 0,                 0,                 0, 0  },
+            { "dry",             no_argument,       0, 'd' },
+            { "dry-commands",    no_argument,       0, 'D' },
+            { 0,                 0,                 0,  0  },
         };
-        int c = getopt_long(argc, argv, "hv;lc",
+        int c = getopt_long(argc, argv, "hv;LlcdD",
                             options, &opt_idx);
 
         if (c == -1)
@@ -986,12 +1033,18 @@ struct arg_options parse_args(const int argc, char **argv)
                     "   %s [OPTION...] [INSTALLER...]\n"
                     "\n"
                     "Options:\n"
-                    "  -h, --help               - print this help message and exit\n"
-                    "  -v, --verbose[=LEVEL]    - possible values: trace, debug, info, warn, error\n"
+                    "  -h, --help               - Print this help message and exit.\n"
+                    "  -v, --verbose[=LEVEL]    - Possible values: trace, debug, info, warn, error.\n"
                     "                             By default: warn\n"
                     "                             When passing without specific level: info\n"
-                    "  -l, --list-installers    - list all available installers and exit\n"
-                    "  -c, --confirm            - asks for confirmation before running any installer\n"
+                    "  -L, --no-location        - Do not include the location in log messages\n"
+                    "  -l, --list-installers    - List all available installers and exit.\n"
+                    "  -c, --confirm            - Asks for confirmation before running any installer.\n"
+                    "  -d, --dry                - Execute everything but do not change anything, will also\n"
+                    "                             set verbosity to 'info' unless '--verbose' is passed.\n"
+                    "  -D, --dry-commands       - Will allow to execute commands while in dry mode, normally\n"
+                    "                             such commands would only be logged and not executed.\n"
+                    "                             Note that this might lead to changes on your system.\n"
                     , prog
                 );
                 opts.exit = true;
@@ -1014,6 +1067,11 @@ struct arg_options parse_args(const int argc, char **argv)
                 } else {
                     opts.ll = LL_Info;
                 }
+                verbosity_set = true;
+                break;
+
+            case 'L': // :no-location
+                opts.log_loc = false;
                 break;
 
             case 'l': // :list-installers
@@ -1023,6 +1081,19 @@ struct arg_options parse_args(const int argc, char **argv)
             case 'c': // :confirm
                 opts.confirm = true;
                 break;
+
+            case 'd': // :dry
+                opts.dry = true;
+                if (!verbosity_set)
+                    opts.ll = LL_Info;
+                break;
+
+            case 'D': // :dry-commands
+                opts.dry_commands = true;
+                break;
+
+            case '?':
+                die("Failed to parse arguments");
 
             default: 
                 die("'getopt_long' returned garbage: %c (0x%X)", c, c);
@@ -1087,7 +1158,7 @@ int main(int argc, char **argv)
     if (opts.exit)
         return 0;
 
-    init_state(opts.ll);
+    init_state(&opts);
 
     if (opts.list) {
         printf("Available installers:\n");
@@ -1098,7 +1169,9 @@ int main(int argc, char **argv)
     }
 
     Sizes to_run = installers_to_run(argc, argv);
+    assert(to_run.len > 0);
 
+    msg(LL_Info, "Running in dry mode");
     if (opts.confirm || state.min_level <= LL_Debug) {
         printf("Running following installers:\n");
         for (size_t i = 0; i < to_run.len; i += 1)
@@ -1112,8 +1185,9 @@ int main(int argc, char **argv)
     for (size_t i = 0; i < to_run.len; i += 1) {
         Installer *inst = &state.available.items[to_run.items[i]];
         printf(":: Running %s\n", inst->name);
-        // run_installer(inst, zero(Context));
+        run_installer(inst, zero(Context));
     }
+    printf(":: Finished\n");
 
 exit:
 #ifdef SHEBANG // defined when compiling with the shebang

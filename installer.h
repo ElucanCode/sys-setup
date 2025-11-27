@@ -1,8 +1,10 @@
 #ifndef _INSTALLER_H_
 #define _INSTALLER_H_
 
+#include <assert.h>
 #include <stdbool.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/types.h>
 
 // NOTE: Everything marked as API is supplied by the sys-setup executable.
@@ -125,9 +127,13 @@
 #define SRCLOC_ARG(sl) (sl)->file, (sl)->function, (sl)->line
 
 #define INVALID_PID (-1)
+#define PSEUDO_PID (-2)
 #define INVALID_FILE_DES (-1)
+#define PSEUDO_FILE_DES (-2)
 #define INVALID_PROCESS \
     ((Process) { INVALID_PID, INVALID_FILE_DES, INVALID_FILE_DES, INVALID_FILE_DES })
+#define PSEUDO_PROCESS \
+    ((Process) { PSEUDO_PID, PSEUDO_FILE_DES, PSEUDO_FILE_DES, PSEUDO_FILE_DES })
 #define PIPE_READ (0)
 #define PIPE_WRITE (1)
 
