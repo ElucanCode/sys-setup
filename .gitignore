@@ -1,5 +1,6 @@
 sys-setup
 */*.o
 */*.so
+*.bak
 dwm/dwm
 dwm/config.h
