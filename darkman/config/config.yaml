@@ -1,0 +1,6 @@
+# Berlin
+lat: 52.5
+lng: 13.4
+usegeoclue: false
+dbusserver: true
+portal: true
