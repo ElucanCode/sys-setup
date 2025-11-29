@@ -21,6 +21,7 @@
 
 #define zero(ty) ((ty) { 0 })
 #define shift(arr, len) (assert((len) > 0 && "Can't shift the array any more"), (len) -= 1, *(arr)++)
+#define ignore_param (void)
 
 // adapted from: https://github.com/tsoding/nob.h
 #define da_reserve(da, space) do {                                              \
@@ -288,6 +289,13 @@ API Strings _strs(const char *first, ...);
 #define strs(first, ...) \
     _strs((first), ##__VA_ARGS__, NULL)
 
+// Assumes, that the variadic always ends with `NULL` and only contains `char*`
+__attribute__((nonnull(1)))
+API char *_concat(const char *first, ...);
+
+#define concat(first, ...) \
+    _concat((first), ##__VA_ARGS__, NULL)
+
 API void promt(char *p, Buffer *buf);
 
 API void to_lower(char *str);
@@ -366,7 +374,7 @@ API Cmd git_clean(char *repo_dir);
 
 API bool exe_exists(char *name);
 
-// TODO: Not really sure how to integrate the pgk managers
+// TODO: Not really sure how to integrate the pkg managers
 API bool is_installed(char *pkg);
 
 // Should be called in `setup`

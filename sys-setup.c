@@ -171,6 +171,23 @@ Strings _strs(const char *first, ...)
     return res;
 }
 
+char *_concat(const char *first, ...)
+{
+    Buffer buf = zero(Buffer);
+
+    va_list args;
+    va_start(args, first);
+    char *cur = (char*)first;
+    do {
+        da_append_many(&buf, cur, strlen(cur));
+    } while ((cur = va_arg(args, char*)));
+    va_end(args);
+
+    if (buf.items)
+        register_ptr(buf.items);
+    return buf.items;
+}
+
 void prompt(char *p, Buffer *buf)
 {
     printf("%s", p);
@@ -717,17 +734,22 @@ bool exe_exists(char *name)
 
 bool is_installed(char *pkg)
 {
-    todo();
+    Cmd cmd = strs("pacman", "-Q", pkg);
+    return 0 == cmd_exec(cmd);
 }
 
 bool ensure_uptodate(Strings pkgs)
 {
-    todo();
+    // TODO: cache the updated/upgraded packages so this is not run multiple times
+    ignore_param(pkgs); // pacman does not support partial upgrades
+    Cmd cmd = strs("sudo", "pacman", "-Syu");
+    return 0 == cmd_exec(cmd);
 }
 
 bool install_pkg(char *name)
 {
-    todo();
+    Cmd cmd = strs("sudo", "pacman", "-S", name);
+    return 0 == cmd_exec(cmd);
 }
 
 // :compilation
@@ -1171,7 +1193,9 @@ int main(int argc, char **argv)
     Sizes to_run = installers_to_run(argc, argv);
     assert(to_run.len > 0);
 
-    msg(LL_Info, "Running in dry mode");
+    if (state.dry)
+        msg(LL_Info, "Running in dry mode");
+
     if (opts.confirm || state.min_level <= LL_Debug) {
         printf("Running following installers:\n");
         for (size_t i = 0; i < to_run.len; i += 1)
