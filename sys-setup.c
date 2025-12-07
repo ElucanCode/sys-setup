@@ -182,6 +182,7 @@ char *_concat(const char *first, ...)
         da_append_many(&buf, cur, strlen(cur));
     } while ((cur = va_arg(args, char*)));
     va_end(args);
+    da_append(&buf, '\0');
 
     if (buf.items)
         register_ptr(buf.items);
@@ -386,8 +387,6 @@ bool cp(char *from, char *to)
 
     close(rfd);
     close(wfd);
-    if (bytes.items)
-        _free(bytes.items);
     return ok;
 }
 
@@ -399,7 +398,11 @@ bool _cp_dir(Tree_Node *from, char *to, Tree_Node_Filter_fn filter,
 
     Buffer buf = zero(Buffer);
     da_append_many(&buf, to, to_len);
+    if (buf.items[buf.len - 1] != '/')
+        da_append(&buf, '/');
     da_append_many(&buf, from->name + root_len, strlen(from->name) - root_len);
+    if (buf.items[buf.len - 1] != '/')
+        da_append(&buf, '/');
     da_append(&buf, '\0');
 
     if (state.dry)
@@ -436,7 +439,7 @@ bool _cp_dir(Tree_Node *from, char *to, Tree_Node_Filter_fn filter,
     
     if (buf.items)
         _free(buf.items);
-    return false;
+    return true;
 }
 
 bool cp_dir(Tree_Node *from, char *to, Tree_Node_Filter_fn filter)
@@ -447,7 +450,8 @@ bool cp_dir(Tree_Node *from, char *to, Tree_Node_Filter_fn filter)
         return false;
     }
     size_t root_len = strlen(from->name);
-    const bool ok = _cp_dir(from, to, filter, root_len, strlen(to));
+    char *to2 = to[strlen(to) - 1] == '/' ? to : concat(to, "/");
+    const bool ok = _cp_dir(from, to2, filter, root_len, strlen(to2));
     return ok;
 }
 
