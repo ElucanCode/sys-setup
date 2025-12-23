@@ -52,6 +52,7 @@ static const Rule rules[] = {
      */
     /* class      instance    title       tags mask     isfloating   monitor */
     // { "Gimp",     NULL,       NULL,       0,            1,           -1 },
+    { NULL, "launcher", NULL, 0, 1, -1 },
     { "ThisDoesNotExistAndIsSimplyAPlaceholder", NULL, NULL, 1, 0, -1 },
 };
 
@@ -82,7 +83,8 @@ static const Layout layouts[] = {
 
 /* commands */
 enum Cmd {
-    Dmenu, Windows, Terminal, Browser, Filebrowser, Lockscreen,
+    Dmenu, Windows, Terminal, Browser, Filebrowser, Switch_Keyboard,
+    Lockscreen,
     Volume_Up, Volume_Down, Volume_Toggle, Brightness_Up, Brightness_Down,
     Dwmblocks_Update_Volume, Dwmblocks_Update_Brightness,
 };
@@ -93,6 +95,7 @@ static const char *cmds[][5] = {
     [Terminal]        = { "alacritty", NULL },
     [Browser]         = { "librewolf", NULL },
     [Filebrowser]     = { "rofi", "-show", "filebrowser", NULL },
+    [Switch_Keyboard] = { "rofi-switchkeyboard", NULL },
     [Lockscreen]      = { "betterlockscreen", "-l", "blur", NULL },
     [Brightness_Up]   = { "backlight_control", "+5%", NULL },
     [Brightness_Down] = { "backlight_control", "-5%", NULL },
@@ -111,7 +114,7 @@ static const Key keys[] = {
     { MODKEY|ControlMask, XK_w,                     spawn, {.v = cmds[Windows] } },
     { MODKEY,             XK_Return,                spawn, {.v = cmds[Terminal] } },
     { MODKEY,             XK_f,                     spawn, {.v = cmds[Filebrowser] } },
-    { MODKEY|ControlMask, XK_l,                     spawn, {.v = cmds[Lockscreen] } },
+    { MODKEY|ControlMask, XK_k,                     spawn, {.v = cmds[Switch_Keyboard] } },
     /* TODO: I don't like, that there is a duplication for these because dwmblocks needs to be updated*/
     { 0,                  XF86XK_MonBrightnessUp,   spawn, {.v = cmds[Brightness_Up] } },
     { 0,                  XF86XK_MonBrightnessDown, spawn, {.v = cmds[Brightness_Down] } },

@@ -1,21 +1,12 @@
 #include "../installer.h"
 
-static Context ctx;
-
-Setup_Result setup(Context c)
-{
-    msg(LL_Info, c.reloaded ? "Successfully reloaded" : "Setting dwm up");
-    ctx = c;
-    Setup_Result res = { 0 };
-    res.ok = true;
-    if (!c.reloaded)
-        res.request_reload = true;
-    return res;
-}
-
 bool run_install(void)
 {
-    Cmd m = sudo(make(strs("clean", "install"), ctx.name));
-    int res = cmd_exec(m);
-    return 0 == res;
+    if (!cp("dwm/rofi-switchkeyboard", concat(getenv("HOME"), "/.local/bin/rofi-switchkeyboard")))
+        msg(LL_Error, "Failed to install 'rofi-switchkeyboard' keyboard switching wont be usable");
+
+    fail_if(cmd_exec(sudo(make(strs("clean", "install"), "dwm/dwm"))), "Failed to install dwm");
+    fail_if(cmd_exec(sudo(make(strs("clean", "install"), "dwm/dwmblocks"))), "Failed to install dwmblocks");
+
+    return true;
 }

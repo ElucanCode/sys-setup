@@ -1,0 +1,13 @@
+#!/bin/env bash
+us="qwerty (english)"
+de="qwertz (german)"
+choice=$(printf "${us}\n${de}\n" | rofi -dmenu -p "Keyboard layout")
+
+case "$choice" in
+    "${us}")
+        setxkbmap us ;;
+    "${de}")
+        setxkbmap de ;;
+esac
+
+pkill -RTMIN+3 dwmblocks
