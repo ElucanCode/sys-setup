@@ -331,8 +331,11 @@ local add, now, later = MiniDeps.add, MiniDeps.now, MiniDeps.later
 
 -- :plugins :installation
 now(function()
+    -- colorschemes
     add({ source = "catppuccin/nvim" })
     add({ source = "folke/tokyonight.nvim" })
+    add({ source = "nendix/zen.nvim" })
+    -- treesitter & lsp
     add({ source = "nvim-treesitter/nvim-treesitter" })
     add({ source = "nvim-treesitter/nvim-treesitter-context" })
     add({ source = "williamboman/mason.nvim" })
@@ -343,6 +346,7 @@ now(function()
                 "hrsh7th/cmp-nvim-lsp", "hrsh7th/cmp-path",
                 "hrsh7th/cmp-buffer", "onsails/lspkind.nvim",
     }})
+    -- utility
     add({ source = "stevearc/oil.nvim" })
     add({ source = "folke/which-key.nvim" })
     add({ source = "hedyhli/outline.nvim" })
@@ -350,6 +354,9 @@ now(function()
             depends = { "nvim-lua/plenary.nvim" } })
     add({ source = "tpope/vim-fugitive",
             name = "fugitive" })
+    add({ source = "folke/zen-mode.nvim" })
+    add({ source = "nvzone/typr",
+            depends = { "nvzone/volt" } })
 end)
 
 -- :setup :colorscheme
@@ -571,6 +578,15 @@ later(function()
     })
 end)
 
+-- :setup :zen-mode
+later(function()
+    map("n", "<leader>z", ":ZenMode<CR>", { desc = "Toggle zen mode" })
+end)
+
+-- :setup :typr
+later(function()
+    require("typr").setup()
+end)
 
 -- Old lsp / completion
 -- later(function()
