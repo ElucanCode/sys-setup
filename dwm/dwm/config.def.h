@@ -115,6 +115,7 @@ static const Key keys[] = {
     { MODKEY,             XK_Return,                spawn, {.v = cmds[Terminal] } },
     { MODKEY,             XK_f,                     spawn, {.v = cmds[Filebrowser] } },
     { MODKEY|ControlMask, XK_k,                     spawn, {.v = cmds[Switch_Keyboard] } },
+    { MODKEY|ControlMask, XK_l,                     spawn, {.v = cmds[Lockscreen] } },
     /* TODO: I don't like, that there is a duplication for these because dwmblocks needs to be updated*/
     { 0,                  XF86XK_MonBrightnessUp,   spawn, {.v = cmds[Brightness_Up] } },
     { 0,                  XF86XK_MonBrightnessDown, spawn, {.v = cmds[Brightness_Down] } },
