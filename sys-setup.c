@@ -1028,7 +1028,7 @@ struct arg_options parse_args(const int argc, char **argv)
     // TODO: move away from getopt as it is kinda weird
     struct arg_options opts = {
         .ll = LL_Warn,
-        .log_loc = true,
+        .log_loc = false,
     };
     const char *prog = *argv;
     bool verbosity_set = false;
@@ -1039,7 +1039,7 @@ struct arg_options parse_args(const int argc, char **argv)
         static struct option options[] = {
             { "help",            no_argument,       0, 'h' },
             { "verbose",         optional_argument, 0, 'v' },
-            { "no-location",     no_argument,       0, 'L' },
+            { "location",        no_argument,       0, 'L' },
             { "list-installers", no_argument,       0, 'l' },
             { "confirm",         no_argument,       0, 'c' },
             { "dry",             no_argument,       0, 'd' },
@@ -1063,7 +1063,7 @@ struct arg_options parse_args(const int argc, char **argv)
                     "  -v, --verbose[=LEVEL]    - Possible values: trace, debug, info, warn, error.\n"
                     "                             By default: warn\n"
                     "                             When passing without specific level: info\n"
-                    "  -L, --no-location        - Do not include the location in log messages\n"
+                    "  -L, --location           - Do include the location in log messages\n"
                     "  -l, --list-installers    - List all available installers and exit.\n"
                     "  -c, --confirm            - Asks for confirmation before running any installer.\n"
                     "  -d, --dry                - Execute everything but do not change anything, will also\n"
@@ -1096,8 +1096,8 @@ struct arg_options parse_args(const int argc, char **argv)
                 verbosity_set = true;
                 break;
 
-            case 'L': // :no-location
-                opts.log_loc = false;
+            case 'L': // :location
+                opts.log_loc = true;
                 break;
 
             case 'l': // :list-installers
